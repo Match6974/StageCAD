@@ -1,0 +1,7 @@
+# ビルド生成物
+/build/
+/cmake-build-*/
+
+# Qt Creatorの個人設定
+/.qtcreator/
+*.user
