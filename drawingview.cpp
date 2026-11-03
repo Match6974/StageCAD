@@ -5,6 +5,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
+#include <QApplication>
+#include <QKeyEvent>
 #include <algorithm>
 #include <cmath>
 
@@ -45,9 +47,16 @@ void DrawingView::updatePaper()
     m_paper->setRect(m_settings->paperRectInModel());
     m_printableArea->setRect(m_settings->printableRectInModel());
     const double margin = 10 * m_settings->scaleDenominator();
-    scene()->setSceneRect(m_paper->rect().adjusted(-margin, -margin, margin, margin));
+    const QRectF paperBounds = m_paper->rect().adjusted(-margin, -margin, margin, margin);
+    scene()->setSceneRect(m_contentBounds.isEmpty() ? paperBounds : paperBounds.united(m_contentBounds));
     updateViewTransform();
     emit cursorLeft();
+}
+
+void DrawingView::setContentBounds(QRectF bounds)
+{
+    m_contentBounds = bounds;
+    updatePaper();
 }
 
 void DrawingView::updateViewTransform()
@@ -70,13 +79,86 @@ void DrawingView::updateViewTransform()
 
 void DrawingView::mouseMoveEvent(QMouseEvent *event)
 {
-    emit cursorPositionChanged(mapToScene(event->pos()));
+    const QPointF point = mapToScene(event->pos());
+    emit cursorPositionChanged(point);
+    if (m_picking) {
+        if (event->buttons().testFlag(Qt::LeftButton)
+            && (event->pos() - m_pressPosition).manhattanLength() >= QApplication::startDragDistance())
+            m_dragged = true;
+        if (m_pickKind == DistanceKind::Target || m_pdfBounds.contains(point)) m_hover = point;
+        else m_hover.reset();
+        viewport()->update();
+    }
     QGraphicsView::mouseMoveEvent(event);
+}
+
+void DrawingView::startDistancePick(DistanceKind kind, QRectF pdfBounds)
+{
+    clearDistancePick();
+    m_pickKind = kind;
+    m_pdfBounds = pdfBounds;
+    m_picking = true;
+    viewport()->setCursor(Qt::CrossCursor);
+    setFocus();
+}
+
+void DrawingView::clearDistancePick()
+{
+    m_picking = false;
+    m_first.reset(); m_second.reset(); m_hover.reset();
+    viewport()->unsetCursor();
+    viewport()->update();
+}
+
+void DrawingView::mousePressEvent(QMouseEvent *event)
+{
+    if (m_picking) {
+        m_pressPosition = event->pos(); m_dragged = false;
+        event->accept(); return;
+    }
+    QGraphicsView::mousePressEvent(event);
+}
+
+void DrawingView::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (!m_picking) { QGraphicsView::mouseReleaseEvent(event); return; }
+    event->accept();
+    if (event->button() != Qt::LeftButton || m_dragged) return;
+    const QPointF point = mapToScene(event->pos());
+    if (m_pickKind == DistanceKind::Current && !m_pdfBounds.contains(point)) {
+        emit pickHintChanged(tr("現在の距離はPDFの内側の2点を指定してください。Escで戻ります。"));
+        return;
+    }
+    if (!m_first) {
+        m_first = point;
+        emit pickHintChanged(tr("終点をクリックしてください。Escで測定を中止します。"));
+    } else {
+        const double distance = QLineF(*m_first, point).length();
+        if (!std::isfinite(distance) || distance <= 0) {
+            emit pickHintChanged(tr("始点とは異なる点を指定してください。"));
+            return;
+        }
+        m_second = point;
+        m_picking = false;
+        viewport()->unsetCursor();
+        emit distancePicked(m_pickKind, *m_first, *m_second);
+    }
+    viewport()->update();
+}
+
+void DrawingView::keyPressEvent(QKeyEvent *event)
+{
+    if (m_picking && event->key() == Qt::Key_Escape) {
+        clearDistancePick(); emit distancePickCanceled(); event->accept(); return;
+    }
+    QGraphicsView::keyPressEvent(event);
 }
 
 void DrawingView::leaveEvent(QEvent *event)
 {
     emit cursorLeft();
+    m_hover.reset();
+    viewport()->update();
     QGraphicsView::leaveEvent(event);
 }
 
@@ -95,5 +177,20 @@ void DrawingView::drawForeground(QPainter *painter, const QRectF &)
     const double radius = 6.0 / std::abs(transform().m11());
     painter->drawLine(QPointF(-radius, 0), QPointF(radius, 0));
     painter->drawLine(QPointF(0, -radius), QPointF(0, radius));
+    if (m_first) {
+        pen.setWidth(2);
+        pen.setColor(m_pickKind == DistanceKind::Current ? QColor("#d52d41") : QColor("#11804b"));
+        painter->setPen(pen);
+        painter->setBrush(pen.color());
+        const double marker = 4.0 / std::abs(transform().m11());
+        painter->drawEllipse(*m_first, marker, marker);
+        if (m_second) {
+            painter->drawLine(*m_first, *m_second);
+            painter->drawEllipse(*m_second, marker, marker);
+        } else if (m_hover) {
+            pen.setStyle(Qt::DashLine); painter->setPen(pen);
+            painter->drawLine(*m_first, *m_hover);
+        }
+    }
     painter->restore();
 }
