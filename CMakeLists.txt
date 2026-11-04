@@ -89,4 +89,24 @@ if(BUILD_TESTING)
     add_test(NAME stagecad_pdf_tests COMMAND stagecad_pdf_tests)
     set_tests_properties(stagecad_pdf_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
+    qt_add_executable(stagecad_shutdown_probe
+        tests/shutdown_probe.cpp
+        drawingsettings.cpp drawingsettings.h
+        drawingview.cpp drawingview.h
+        scaledialog.cpp scaledialog.h
+        pdfplacement.cpp pdfplacement.h
+        pdfpageitem.cpp pdfpageitem.h
+        pdfcalibrationdialog.cpp pdfcalibrationdialog.h
+        mainwindow.cpp mainwindow.h mainwindow.ui
+    )
+    target_include_directories(stagecad_shutdown_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(stagecad_shutdown_probe PRIVATE
+        SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
+    target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
+    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled)
+        add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
+        set_tests_properties(shutdown_${scenario} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+    endforeach()
 endif()
