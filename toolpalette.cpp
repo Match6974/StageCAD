@@ -5,6 +5,7 @@
 #include <QEvent>
 #include <QGridLayout>
 #include <QIcon>
+#include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScrollArea>
@@ -112,6 +113,9 @@ ToolPalette::ToolPalette(QWidget *parent) : QWidget(parent)
     m_scroll->setWidgetResizable(true); m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_content = new QWidget(m_scroll); m_content->setObjectName("toolPaletteContent");
     m_scroll->setWidget(m_content); layout->addWidget(m_scroll);
+    m_hint = new QLabel(this); m_hint->setObjectName("toolPaletteHint");
+    m_hint->setWordWrap(true); m_hint->setMargin(4);
+    layout->addWidget(m_hint);
     m_group = new QActionGroup(this); m_group->setExclusive(true);
     for (const auto &item : tools) {
         auto *action = new QAction(toolIcon(item.tool, palette().color(QPalette::WindowText)), tr(item.button), m_group);
@@ -119,7 +123,7 @@ ToolPalette::ToolPalette(QWidget *parent) : QWidget(parent)
         action->setProperty("featureId", QString::fromLatin1(item.featureId));
         action->setProperty("drawingTool", QVariant::fromValue(item.tool));
         action->setCheckable(true); action->setEnabled(item.available);
-        const bool modeOnly = item.available && item.tool != DrawingTool::Pan;
+        const bool modeOnly = item.tool == DrawingTool::Selection;
         action->setToolTip(tr(item.name) + (!item.available ? tr("（未対応）")
             : modeOnly ? tr("（現在はモード切替のみ）") : QString()));
         connect(action, &QAction::triggered, this, [this, tool = item.tool] { setCurrentTool(tool); });
@@ -132,6 +136,8 @@ ToolPalette::ToolPalette(QWidget *parent) : QWidget(parent)
     m_scroll->viewport()->installEventFilter(this);
     scheduleLayout();
 }
+
+void ToolPalette::setToolHint(const QString &text) { m_hint->setText(text); }
 
 QAction *ToolPalette::toolAction(DrawingTool tool) const
 {

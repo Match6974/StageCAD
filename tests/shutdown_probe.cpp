@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "drawingview.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfplacement.h"
 
@@ -54,6 +55,12 @@ int main(int argc, char **argv)
         }
         if (scenario == "floating-palette") w.findChild<QDockWidget*>("basicToolDock")->setFloating(true);
         if (scenario == "closed-palette") w.findChild<QDockWidget*>("basicToolDock")->close();
+        if (scenario == "drawing-draft") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            auto *view = w.findChild<DrawingView*>();
+            view->setActiveTool(DrawingTool::Polygon);
+            view->submitDrawingPoint({0, 0}); view->submitDrawingPoint({20, 0}); view->submitDrawingPoint({10, 20});
+        }
         if (!w.close()) app.exit(6);
     });
     QTimer::singleShot(5000, &app, [&] { app.exit(7); });

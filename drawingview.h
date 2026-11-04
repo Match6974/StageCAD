@@ -4,6 +4,7 @@
 #include <QGraphicsView>
 #include <optional>
 #include "drawingtool.h"
+#include <QPolygonF>
 
 class DrawingSettings;
 class QGraphicsRectItem;
@@ -19,6 +20,16 @@ public:
     void resetView();
     DrawingTool activeTool() const { return m_activeTool; }
     bool setActiveTool(DrawingTool tool);
+    bool submitDrawingPoint(QPointF pointMm, bool constrainLine = false);
+    bool finishPolygon();
+    void cancelDrawing();
+    void setDrawingEnabled(bool enabled);
+    bool drawingEnabled() const { return m_drawingEnabled; }
+    int draftPointCount() const { return m_draftPoints.size(); }
+    bool canFinishPolygon() const;
+    QString drawingHint() const;
+    const QList<QGraphicsItem*> &shapeItems() const { return m_shapes; }
+    static constexpr int ShapeToolRole = 0x5343;
     enum class DistanceKind { Current, Target };
     Q_ENUM(DistanceKind)
     void startDistancePick(DistanceKind kind, QRectF pdfBounds);
@@ -33,6 +44,9 @@ signals:
     void distancePickCanceled();
     void pickHintChanged(const QString &text);
     void activeToolChanged(DrawingTool tool);
+    void drawingStateChanged();
+    void drawingHintChanged(const QString &text);
+    void shapeCreated(DrawingTool tool);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -40,6 +54,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void drawForeground(QPainter *painter, const QRectF &rect) override;
@@ -49,6 +65,11 @@ private:
     void updateViewTransform(QPointF centerMm);
     void setViewCenter(QPointF centerMm);
     void updateInteractionCursor();
+    void updateSceneBounds();
+    void notifyDrawingState();
+    bool isDrawingTool() const;
+    bool commitShape(QPointF secondMm);
+    bool nearDraftVertex(QPointF pointMm, QPointF vertexMm) const;
 
     DrawingSettings *m_settings;
     QGraphicsRectItem *m_paper;
@@ -69,6 +90,13 @@ private:
     Qt::MouseButton m_panButton = Qt::NoButton;
     QPoint m_lastPanPosition;
     QPointF m_viewCenter;
+    bool m_drawingEnabled = true;
+    bool m_drawPressed = false;
+    bool m_ignoreDrawingRelease = false;
+    bool m_drawShift = false;
+    QPolygonF m_draftPoints;
+    std::optional<QPointF> m_draftHover;
+    QList<QGraphicsItem*> m_shapes;
 };
 
 #endif

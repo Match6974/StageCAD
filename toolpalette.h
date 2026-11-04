@@ -10,6 +10,7 @@ class QActionGroup;
 class QGridLayout;
 class QScrollArea;
 class QToolButton;
+class QLabel;
 
 class ToolPalette : public QWidget
 {
@@ -21,6 +22,7 @@ public:
     QAction *toolAction(DrawingTool tool) const;
     static QString toolName(DrawingTool tool);
     static QString modeText(DrawingTool tool);
+    void setToolHint(const QString &text);
 
 signals:
     void toolChanged(DrawingTool tool);
@@ -39,6 +41,7 @@ private:
     DrawingTool m_currentTool = DrawingTool::Selection;
     int m_columns = 0;
     bool m_layoutPending = false;
+    QLabel *m_hint;
 };
 
 #endif

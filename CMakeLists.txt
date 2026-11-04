@@ -94,6 +94,15 @@ if(BUILD_TESTING)
     set_tests_properties(stagecad_palette_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
 
+    qt_add_executable(stagecad_drawing_tests tests/test_drawing.cpp ${STAGECAD_SOURCES})
+    target_include_directories(stagecad_drawing_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(stagecad_drawing_tests PRIVATE
+        SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
+    target_link_libraries(stagecad_drawing_tests PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets Qt::Test)
+    add_test(NAME stagecad_drawing_tests COMMAND stagecad_drawing_tests)
+    set_tests_properties(stagecad_drawing_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(stagecad_shutdown_probe
         tests/shutdown_probe.cpp
         ${STAGECAD_SOURCES}
@@ -102,7 +111,7 @@ if(BUILD_TESTING)
     target_compile_definitions(stagecad_shutdown_probe PRIVATE
         SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
     target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
-    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette)
+    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft)
         add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
         set_tests_properties(shutdown_${scenario} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
