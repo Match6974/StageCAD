@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QFileDialog>
+#include <QDockWidget>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTabWidget>
@@ -51,6 +52,8 @@ int main(int argc, char **argv)
                 dialog->findChild<QPushButton*>("measurePdfCurrentButton")->click();
             else if (scenario == "canceled") dialog->reject();
         }
+        if (scenario == "floating-palette") w.findChild<QDockWidget*>("basicToolDock")->setFloating(true);
+        if (scenario == "closed-palette") w.findChild<QDockWidget*>("basicToolDock")->close();
         if (!w.close()) app.exit(6);
     });
     QTimer::singleShot(5000, &app, [&] { app.exit(7); });

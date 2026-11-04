@@ -5,11 +5,15 @@
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
+#include "toolpalette.h"
 #include <QAction>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDockWidget>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMenuBar>
+#include <QMenu>
 #include <QPdfDocument>
 #include <QPdfPageNavigator>
 #include <QPdfView>
@@ -106,7 +110,39 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_zoomInAction, &QAction::triggered, this, [this] {
         m_drawingView->setDisplayZoom(m_drawingView->displayZoom() * 1.25);
     });
-    connect(m_fitPaperAction, &QAction::triggered, this, [this] { m_drawingView->setDisplayZoom(1); });
+    connect(m_fitPaperAction, &QAction::triggered, this, [this] { m_drawingView->resetView(); });
+
+    auto *toolDock = new QDockWidget(tr("基本パレット"), this);
+    toolDock->setObjectName("basicToolDock");
+    toolDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    toolDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    m_toolPalette = new ToolPalette(toolDock);
+    toolDock->setWidget(m_toolPalette);
+    addDockWidget(Qt::LeftDockWidgetArea, toolDock);
+    resizeDocks({toolDock}, {180}, Qt::Horizontal);
+    auto *viewMenu = menuBar()->addMenu(tr("表示"));
+    viewMenu->addAction(toolDock->toggleViewAction());
+
+    addToolBarBreak(Qt::TopToolBarArea);
+    m_toolOptionsToolbar = addToolBar(tr("ツール"));
+    m_toolOptionsToolbar->setObjectName("toolOptionsToolbar");
+    m_toolOptionsToolbar->setMovable(false);
+    m_toolModeLabel = new QLabel(m_toolOptionsToolbar);
+    m_toolModeLabel->setObjectName("activeToolModeLabel");
+    auto showMode = [this](DrawingTool tool) {
+        m_toolModeLabel->setText(ToolPalette::toolName(tool) + QStringLiteral(" / ") + ToolPalette::modeText(tool));
+    };
+    m_toolOptionsToolbar->addWidget(m_toolModeLabel);
+    connect(m_toolPalette, &ToolPalette::toolChanged, this, [this, showMode](DrawingTool tool) {
+        if (m_pdfCalibrationDialog || !m_drawingView->setActiveTool(tool)) {
+            QSignalBlocker block(m_toolPalette);
+            m_toolPalette->setCurrentTool(m_drawingView->activeTool());
+            return;
+        }
+        showMode(tool);
+    });
+    connect(m_drawingView, &DrawingView::activeToolChanged, m_toolPalette, &ToolPalette::setCurrentTool);
+    showMode(m_toolPalette->currentTool());
 
     m_coordinates = new QLabel(this); m_coordinates->setObjectName("coordinatesLabel");
     m_paperCoverage = new QLabel(this); m_paperCoverage->setObjectName("paperCoverageLabel");
@@ -182,7 +218,7 @@ bool MainWindow::importPdf(const QString &path, QString *error)
         m_pdfPageInput->setRange(1, m_pdfDocument->pageCount()); m_pdfPageInput->setValue(1);
     }
     m_pdfPageCount->setText(tr(" / %1 ").arg(m_pdfDocument->pageCount()));
-    m_drawingView->clearDistancePick(); m_drawingView->setDisplayZoom(1);
+    m_drawingView->clearDistancePick(); m_drawingView->resetView();
     setWindowTitle(tr("%1 — StageCAD").arg(QFileInfo(path).fileName()));
     m_tabs->setCurrentIndex(0); updatePdfActions();
     return true;
@@ -256,6 +292,8 @@ void MainWindow::updatePdfActions()
 {
     const bool idle = !m_pdfCalibrationDialog;
     const bool workspace = m_tabs->currentIndex() == 0;
+    m_toolPalette->setEnabled(idle && workspace);
+    m_toolOptionsToolbar->setEnabled(idle && workspace);
     m_importPdfAction->setEnabled(idle);
     m_calibratePdfAction->setEnabled(idle && workspace && m_pdfPlacement->hasPage());
     m_scaleAction->setEnabled(idle && workspace);

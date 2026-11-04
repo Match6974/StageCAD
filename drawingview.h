@@ -3,6 +3,7 @@
 
 #include <QGraphicsView>
 #include <optional>
+#include "drawingtool.h"
 
 class DrawingSettings;
 class QGraphicsRectItem;
@@ -15,6 +16,9 @@ public:
     explicit DrawingView(DrawingSettings *settings, QWidget *parent = nullptr);
     double displayZoom() const { return m_displayZoom; }
     bool setDisplayZoom(double zoom);
+    void resetView();
+    DrawingTool activeTool() const { return m_activeTool; }
+    bool setActiveTool(DrawingTool tool);
     enum class DistanceKind { Current, Target };
     Q_ENUM(DistanceKind)
     void startDistancePick(DistanceKind kind, QRectF pdfBounds);
@@ -28,19 +32,23 @@ signals:
     void distancePicked(DrawingView::DistanceKind kind, QPointF firstMm, QPointF secondMm);
     void distancePickCanceled();
     void pickHintChanged(const QString &text);
+    void activeToolChanged(DrawingTool tool);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void drawForeground(QPainter *painter, const QRectF &rect) override;
 
 private:
     void updatePaper();
-    void updateViewTransform();
+    void updateViewTransform(QPointF centerMm);
+    void setViewCenter(QPointF centerMm);
+    void updateInteractionCursor();
 
     DrawingSettings *m_settings;
     QGraphicsRectItem *m_paper;
@@ -55,6 +63,12 @@ private:
     std::optional<QPointF> m_first;
     std::optional<QPointF> m_second;
     std::optional<QPointF> m_hover;
+    DrawingTool m_activeTool = DrawingTool::Selection;
+    bool m_panning = false;
+    bool m_updatingView = false;
+    Qt::MouseButton m_panButton = Qt::NoButton;
+    QPoint m_lastPanPosition;
+    QPointF m_viewCenter;
 };
 
 #endif

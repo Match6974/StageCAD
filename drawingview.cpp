@@ -7,6 +7,9 @@
 #include <QResizeEvent>
 #include <QApplication>
 #include <QKeyEvent>
+#include <QWheelEvent>
+#include <QScopedValueRollback>
+#include <QScrollBar>
 #include <algorithm>
 #include <cmath>
 
@@ -18,6 +21,11 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     setBackgroundBrush(QColor("#51565e"));
     setRenderHint(QPainter::Antialiasing);
     setMouseTracking(true);
+    auto rememberScroll = [this] {
+        if (!m_updatingView) m_viewCenter = mapToScene(viewport()->rect().center());
+    };
+    connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, rememberScroll);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, rememberScroll);
     setToolTip(tr("CAD座標は実寸mmです。原点は用紙中心、Xは右向き、Yは上向きです。"));
 
     QPen border(QColor("#252a30"));
@@ -36,9 +44,39 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
 bool DrawingView::setDisplayZoom(double zoom)
 {
     if (!std::isfinite(zoom) || zoom < 0.1 || zoom > 10.0) return false;
+    const QPointF center = m_viewCenter;
     m_displayZoom = zoom;
-    updateViewTransform();
+    updateViewTransform(center);
     return true;
+}
+
+void DrawingView::resetView()
+{
+    m_displayZoom = 1;
+    updateViewTransform({});
+}
+
+bool DrawingView::setActiveTool(DrawingTool tool)
+{
+    if (m_picking || (tool != DrawingTool::Selection && tool != DrawingTool::Pan
+        && tool != DrawingTool::Line && tool != DrawingTool::Rectangle
+        && tool != DrawingTool::Circle && tool != DrawingTool::Polygon)) return false;
+    if (m_activeTool != tool) {
+        m_panning = false;
+        m_activeTool = tool;
+        updateInteractionCursor();
+        emit activeToolChanged(tool);
+    }
+    return true;
+}
+
+void DrawingView::updateInteractionCursor()
+{
+    if (m_panning) viewport()->setCursor(Qt::ClosedHandCursor);
+    else if (m_picking) viewport()->setCursor(Qt::CrossCursor);
+    else if (m_activeTool == DrawingTool::Pan) viewport()->setCursor(Qt::OpenHandCursor);
+    else if (m_activeTool == DrawingTool::Selection) viewport()->setCursor(Qt::ArrowCursor);
+    else viewport()->setCursor(Qt::CrossCursor);
 }
 
 void DrawingView::updatePaper()
@@ -49,18 +87,23 @@ void DrawingView::updatePaper()
     const double margin = 10 * m_settings->scaleDenominator();
     const QRectF paperBounds = m_paper->rect().adjusted(-margin, -margin, margin, margin);
     scene()->setSceneRect(m_contentBounds.isEmpty() ? paperBounds : paperBounds.united(m_contentBounds));
-    updateViewTransform();
+    updateViewTransform({});
     emit cursorLeft();
 }
 
 void DrawingView::setContentBounds(QRectF bounds)
 {
     m_contentBounds = bounds;
-    updatePaper();
+    const double margin = 10 * m_settings->scaleDenominator();
+    const QRectF paperBounds = m_paper->rect().adjusted(-margin, -margin, margin, margin);
+    scene()->setSceneRect(bounds.isEmpty() ? paperBounds : paperBounds.united(bounds));
+    setViewCenter(m_viewCenter);
 }
 
-void DrawingView::updateViewTransform()
+void DrawingView::updateViewTransform(QPointF center)
 {
+    if (m_updatingView) return;
+    QScopedValueRollback<bool> updating(m_updatingView, true);
     const QSizeF paper = m_settings->paperSizeMm();
     // Scroll bars can appear during zoom. Their appearance must not redefine
     // the base fit scale, otherwise zoom and resize recursively change it.
@@ -74,11 +117,51 @@ void DrawingView::updateViewTransform()
         / m_settings->scaleDenominator();
     // Invert only the view's Y axis. Geometry in the scene remains in real mm.
     setTransform(QTransform::fromScale(pixelsPerModelMm, -pixelsPerModelMm));
-    centerOn(0, 0);
+    setViewCenter(center);
+}
+
+void DrawingView::setViewCenter(QPointF center)
+{
+    QScopedValueRollback<bool> updating(m_updatingView, true);
+    m_viewCenter = center;
+    const QSizeF visible(std::max(1, viewport()->width()) / std::abs(transform().m11()),
+                         std::max(1, viewport()->height()) / std::abs(transform().m22()));
+    // Navigation margins are view-only. Panning and cursor-centered zoom must
+    // also work in the gray area, without changing model items or paper bounds.
+    const QRectF navigation(center.x() - visible.width() * 1.5,
+                            center.y() - visible.height() * 1.5,
+                            visible.width() * 3, visible.height() * 3);
+    setSceneRect(scene()->sceneRect().united(navigation));
+    centerOn(center);
+}
+
+void DrawingView::wheelEvent(QWheelEvent *event)
+{
+    const double delta = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->pixelDelta().y();
+    if (delta == 0) { event->ignore(); return; }
+    const QPoint position = event->position().toPoint();
+    const QPointF fixedPoint = mapToScene(position);
+    const double zoom = std::clamp(m_displayZoom * std::pow(1.25, delta / 120.0), 0.1, 10.0);
+    setDisplayZoom(zoom);
+    setViewCenter(m_viewCenter + fixedPoint - mapToScene(position));
+    // Qt scroll bars use integer device positions. Correct the final device
+    // offset directly rather than accumulating rounded scene-center errors.
+    const QPointF error = viewportTransform().map(fixedPoint) - event->position();
+    horizontalScrollBar()->setValue(horizontalScrollBar()->value() + qRound(error.x()));
+    verticalScrollBar()->setValue(verticalScrollBar()->value() + qRound(error.y()));
+    viewport()->update();
+    event->accept();
 }
 
 void DrawingView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_panning) {
+        const QPoint delta = event->pos() - m_lastPanPosition;
+        setViewCenter(mapToScene(viewport()->rect().center() - delta));
+        m_lastPanPosition = event->pos();
+        emit cursorPositionChanged(mapToScene(event->pos()));
+        event->accept(); return;
+    }
     const QPointF point = mapToScene(event->pos());
     emit cursorPositionChanged(point);
     if (m_picking) {
@@ -98,20 +181,26 @@ void DrawingView::startDistancePick(DistanceKind kind, QRectF pdfBounds)
     m_pickKind = kind;
     m_pdfBounds = pdfBounds;
     m_picking = true;
-    viewport()->setCursor(Qt::CrossCursor);
+    updateInteractionCursor();
     setFocus();
 }
 
 void DrawingView::clearDistancePick()
 {
     m_picking = false;
+    m_panning = false;
     m_first.reset(); m_second.reset(); m_hover.reset();
-    viewport()->unsetCursor();
+    updateInteractionCursor();
     viewport()->update();
 }
 
 void DrawingView::mousePressEvent(QMouseEvent *event)
 {
+    if (event->button() == Qt::MiddleButton
+        || (event->button() == Qt::LeftButton && m_activeTool == DrawingTool::Pan && !m_picking)) {
+        m_panning = true; m_panButton = event->button(); m_lastPanPosition = event->pos();
+        setFocus(); updateInteractionCursor(); event->accept(); return;
+    }
     if (m_picking) {
         m_pressPosition = event->pos(); m_dragged = false;
         event->accept(); return;
@@ -121,6 +210,10 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
 
 void DrawingView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_panning) {
+        if (event->button() == m_panButton) { m_panning = false; updateInteractionCursor(); }
+        event->accept(); return;
+    }
     if (!m_picking) { QGraphicsView::mouseReleaseEvent(event); return; }
     event->accept();
     if (event->button() != Qt::LeftButton || m_dragged) return;
@@ -140,7 +233,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
         }
         m_second = point;
         m_picking = false;
-        viewport()->unsetCursor();
+        updateInteractionCursor();
         emit distancePicked(m_pickKind, *m_first, *m_second);
     }
     viewport()->update();
@@ -150,6 +243,9 @@ void DrawingView::keyPressEvent(QKeyEvent *event)
 {
     if (m_picking && event->key() == Qt::Key_Escape) {
         clearDistancePick(); emit distancePickCanceled(); event->accept(); return;
+    }
+    if (m_panning && event->key() == Qt::Key_Escape) {
+        m_panning = false; updateInteractionCursor(); event->accept(); return;
     }
     QGraphicsView::keyPressEvent(event);
 }
@@ -164,8 +260,12 @@ void DrawingView::leaveEvent(QEvent *event)
 
 void DrawingView::resizeEvent(QResizeEvent *event)
 {
-    QGraphicsView::resizeEvent(event);
-    updateViewTransform();
+    const bool alreadyUpdating = m_updatingView;
+    {
+        QScopedValueRollback<bool> updating(m_updatingView, true);
+        QGraphicsView::resizeEvent(event);
+    }
+    if (!alreadyUpdating) updateViewTransform(m_viewCenter);
 }
 
 void DrawingView::drawForeground(QPainter *painter, const QRectF &)

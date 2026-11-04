@@ -10,9 +10,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
 
 qt_standard_project_setup()
 
-qt_add_executable(PDFOpen
-    WIN32 MACOSX_BUNDLE
-    main.cpp
+set(STAGECAD_SOURCES
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
@@ -28,6 +26,15 @@ qt_add_executable(PDFOpen
     pdfpageitem.h
     pdfcalibrationdialog.cpp
     pdfcalibrationdialog.h
+    drawingtool.h
+    toolpalette.cpp
+    toolpalette.h
+)
+
+qt_add_executable(PDFOpen
+    WIN32 MACOSX_BUNDLE
+    main.cpp
+    ${STAGECAD_SOURCES}
 )
 
 target_link_libraries(PDFOpen
@@ -56,13 +63,7 @@ if(BUILD_TESTING)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
     qt_add_executable(stagecad_tests
         tests/test_coordinates.cpp
-        drawingsettings.cpp drawingsettings.h
-        drawingview.cpp drawingview.h
-        scaledialog.cpp scaledialog.h
-        pdfplacement.cpp pdfplacement.h
-        pdfpageitem.cpp pdfpageitem.h
-        pdfcalibrationdialog.cpp pdfcalibrationdialog.h
-        mainwindow.cpp mainwindow.h mainwindow.ui
+        ${STAGECAD_SOURCES}
     )
     target_include_directories(stagecad_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(stagecad_tests PRIVATE
@@ -74,13 +75,7 @@ if(BUILD_TESTING)
 
     qt_add_executable(stagecad_pdf_tests
         tests/test_pdfcalibration.cpp
-        drawingsettings.cpp drawingsettings.h
-        drawingview.cpp drawingview.h
-        scaledialog.cpp scaledialog.h
-        pdfplacement.cpp pdfplacement.h
-        pdfpageitem.cpp pdfpageitem.h
-        pdfcalibrationdialog.cpp pdfcalibrationdialog.h
-        mainwindow.cpp mainwindow.h mainwindow.ui
+        ${STAGECAD_SOURCES}
     )
     target_include_directories(stagecad_pdf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(stagecad_pdf_tests PRIVATE
@@ -90,21 +85,24 @@ if(BUILD_TESTING)
     set_tests_properties(stagecad_pdf_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
 
+    qt_add_executable(stagecad_palette_tests tests/test_toolpalette.cpp ${STAGECAD_SOURCES})
+    target_include_directories(stagecad_palette_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(stagecad_palette_tests PRIVATE
+        SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
+    target_link_libraries(stagecad_palette_tests PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets Qt::Test)
+    add_test(NAME stagecad_palette_tests COMMAND stagecad_palette_tests)
+    set_tests_properties(stagecad_palette_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(stagecad_shutdown_probe
         tests/shutdown_probe.cpp
-        drawingsettings.cpp drawingsettings.h
-        drawingview.cpp drawingview.h
-        scaledialog.cpp scaledialog.h
-        pdfplacement.cpp pdfplacement.h
-        pdfpageitem.cpp pdfpageitem.h
-        pdfcalibrationdialog.cpp pdfcalibrationdialog.h
-        mainwindow.cpp mainwindow.h mainwindow.ui
+        ${STAGECAD_SOURCES}
     )
     target_include_directories(stagecad_shutdown_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(stagecad_shutdown_probe PRIVATE
         SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
     target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
-    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled)
+    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette)
         add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
         set_tests_properties(shutdown_${scenario} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)

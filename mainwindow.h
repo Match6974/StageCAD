@@ -15,6 +15,8 @@ class QPdfView;
 class QSpinBox;
 class QTabWidget;
 class PdfCalibrationDialog;
+class ToolPalette;
+class QToolBar;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -62,5 +64,8 @@ private:
     int m_pdfPage = 0;
     double m_importDenominator = 1;
     QString m_pdfPath;
+    ToolPalette *m_toolPalette;
+    QLabel *m_toolModeLabel;
+    QToolBar *m_toolOptionsToolbar;
 };
 #endif // MAINWINDOW_H
