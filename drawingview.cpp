@@ -7,6 +7,9 @@
 #include <QGraphicsPolygonItem>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPathStroker>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QResizeEvent>
 #include <QApplication>
 #include <QKeyEvent>
@@ -59,6 +62,19 @@ QPointF constrainedLinePoint(QPointF first, QPointF point)
     return first + direction * projected;
 }
 
+QPainterPath geometryPath(QGraphicsItem *item)
+{
+    QPainterPath path;
+    if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
+        path.moveTo(line->line().p1()); path.lineTo(line->line().p2());
+    } else if (auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(item)) path.addRect(rect->rect());
+    else if (auto *circle = qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) path.addEllipse(circle->rect());
+    else if (auto *polygon = qgraphicsitem_cast<QGraphicsPolygonItem*>(item)) {
+        path.addPolygon(polygon->polygon()); path.closeSubpath();
+    }
+    return path;
+}
+
 QPen shapePen()
 {
     QPen pen(QColor("#182b3d"), 1.5); pen.setCosmetic(true); return pen;
@@ -72,6 +88,9 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
 {
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
+    m_selectionMenu = new QMenu(this); m_selectionMenu->setObjectName("shapeSelectionMenu");
+    auto *remove = m_selectionMenu->addAction(tr("削除")); remove->setObjectName("deleteSelectedShapesAction");
+    connect(remove, &QAction::triggered, this, [this] { deleteSelectedShapes(); });
     setBackgroundBrush(QColor("#51565e"));
     setRenderHint(QPainter::Antialiasing);
     setMouseTracking(true);
@@ -116,6 +135,7 @@ bool DrawingView::setActiveTool(DrawingTool tool)
         && tool != DrawingTool::Line && tool != DrawingTool::Rectangle
         && tool != DrawingTool::Circle && tool != DrawingTool::Polygon)) return false;
     if (m_activeTool != tool) {
+        endShapeMove(false); m_selectionMenu->hide();
         cancelDrawing();
         m_panning = false;
         m_activeTool = tool;
@@ -135,7 +155,8 @@ bool DrawingView::isDrawingTool() const
 QString DrawingView::drawingHint() const
 {
     if (!m_drawingEnabled) return tr("作業領域で描画ツールを選択してください。");
-    if (m_activeTool == DrawingTool::Selection) return tr("選択操作は未対応です。");
+    if (m_activeTool == DrawingTool::Selection)
+        return tr("クリックで選択、Shiftで追加・解除。選択図形をドラッグで移動、Delか右クリックで削除、Escで解除します。");
     if (m_activeTool == DrawingTool::Pan) return tr("左ドラッグで画面を移動します。");
     if (m_activeTool == DrawingTool::Polygon)
         return m_draftPoints.isEmpty() ? tr("最初の頂点を指定してください。")
@@ -164,7 +185,7 @@ void DrawingView::setDrawingEnabled(bool enabled)
 {
     if (m_drawingEnabled == enabled) return;
     m_drawingEnabled = enabled;
-    if (!enabled) cancelDrawing();
+    if (!enabled) { endShapeMove(false); m_selectionMenu->hide(); cancelDrawing(); }
     else notifyDrawingState();
 }
 
@@ -221,7 +242,7 @@ bool DrawingView::commitShape(QPointF second)
         return false;
     }
     item->setData(ShapeToolRole, QVariant::fromValue(m_activeTool));
-    m_shapes.append(item);
+    registerShape(item);
     updateSceneBounds(); setViewCenter(m_viewCenter);
     const DrawingTool created = m_activeTool;
     cancelDrawing(); emit shapeCreated(created);
@@ -241,10 +262,82 @@ bool DrawingView::finishPolygon()
     }
     auto *item = scene()->addPolygon(m_draftPoints, shapePen(), shapeBrush());
     item->setData(ShapeToolRole, QVariant::fromValue(DrawingTool::Polygon));
-    m_shapes.append(item);
+    registerShape(item);
     updateSceneBounds(); setViewCenter(m_viewCenter);
     cancelDrawing(); emit shapeCreated(DrawingTool::Polygon);
     return true;
+}
+
+void DrawingView::registerShape(QGraphicsItem *item)
+{
+    item->setFlag(QGraphicsItem::ItemIsSelectable);
+    m_shapes.append(item);
+}
+
+QList<QGraphicsItem*> DrawingView::selectedShapeItems() const
+{
+    QList<QGraphicsItem*> result;
+    for (auto *item : m_shapes) if (item->isSelected()) result.append(item);
+    return result;
+}
+
+void DrawingView::notifySelection()
+{
+    viewport()->update(); emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
+}
+
+void DrawingView::clearShapeSelection()
+{
+    endShapeMove(false);
+    for (auto *item : m_shapes) item->setSelected(false);
+    notifySelection();
+}
+
+QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
+{
+    // Hit tolerance is in screen pixels so thin lines remain usable at any scale.
+    QPainterPathStroker stroker; stroker.setWidth(12);
+    for (auto it = m_shapes.crbegin(); it != m_shapes.crend(); ++it) {
+        auto *item = *it;
+        if (!item->isVisible()) continue;
+        const QPainterPath path = viewportTransform().map(item->mapToScene(geometryPath(item)));
+        const bool filled = item->type() != QGraphicsLineItem::Type;
+        if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
+    }
+    return nullptr;
+}
+
+void DrawingView::endShapeMove(bool commit)
+{
+    if (!commit) for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second);
+    m_moveOrigins.clear(); m_selectionPressed = false;
+    const bool wasMoving = m_movingShapes; m_movingShapes = false;
+    if (wasMoving) { updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update(); }
+}
+
+bool DrawingView::deleteSelectedShapes()
+{
+    if (!m_drawingEnabled || m_picking || m_panning || m_activeTool != DrawingTool::Selection) return false;
+    endShapeMove(false);
+    const auto selected = selectedShapeItems();
+    if (selected.isEmpty()) return false;
+    for (auto *item : selected) { m_shapes.removeOne(item); delete item; }
+    updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
+    return true;
+}
+
+void DrawingView::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (!m_drawingEnabled || m_picking || m_panning || m_activeTool != DrawingTool::Selection) {
+        event->accept(); return;
+    }
+    endShapeMove(false);
+    auto *hit = shapeAt(event->pos());
+    if (hit && !hit->isSelected()) {
+        clearShapeSelection(); hit->setSelected(true); notifySelection();
+    }
+    m_selectionMenu->actions().first()->setEnabled(!selectedShapeItems().isEmpty());
+    m_selectionMenu->popup(event->globalPos()); event->accept();
 }
 
 void DrawingView::updateInteractionCursor()
@@ -258,6 +351,7 @@ void DrawingView::updateInteractionCursor()
 
 void DrawingView::updatePaper()
 {
+    endShapeMove(false);
     // Only the paper's real-world coverage changes; model items are untouched.
     m_paper->setRect(m_settings->paperRectInModel());
     m_printableArea->setRect(m_settings->printableRectInModel());
@@ -320,6 +414,7 @@ void DrawingView::setViewCenter(QPointF center)
 
 void DrawingView::wheelEvent(QWheelEvent *event)
 {
+    endShapeMove(false);
     const double delta = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->pixelDelta().y();
     if (delta == 0) { event->ignore(); return; }
     const QPoint position = event->position().toPoint();
@@ -347,6 +442,21 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
     }
     const QPointF point = mapToScene(event->pos());
     emit cursorPositionChanged(point);
+    if (m_selectionPressed) {
+        if (!m_movingShapes && (event->pos() - m_selectionPressPixel).manhattanLength() < QApplication::startDragDistance()) {
+            event->accept(); return;
+        }
+        m_movingShapes = true;
+        const QPointF delta = point - m_selectionPressMm;
+        bool valid = std::isfinite(delta.x()) && std::isfinite(delta.y());
+        for (const auto &origin : m_moveOrigins) {
+            const QRectF bounds = geometryPath(origin.first).boundingRect().translated(origin.second + delta);
+            valid = valid && validPoint(bounds.topLeft()) && validPoint(bounds.bottomRight());
+        }
+        if (valid) for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second + delta);
+        else emit drawingHintChanged(tr("移動後の座標は±10000000mm以内にしてください。"));
+        viewport()->update(); event->accept(); return;
+    }
     if (m_picking) {
         if (event->buttons().testFlag(Qt::LeftButton)
             && (event->pos() - m_pressPosition).manhattanLength() >= QApplication::startDragDistance())
@@ -366,6 +476,7 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
 
 void DrawingView::startDistancePick(DistanceKind kind, QRectF pdfBounds)
 {
+    endShapeMove(false); m_selectionMenu->hide();
     cancelDrawing();
     clearDistancePick();
     m_pickKind = kind;
@@ -388,6 +499,7 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::MiddleButton
         || (event->button() == Qt::LeftButton && m_activeTool == DrawingTool::Pan && !m_picking)) {
+        endShapeMove(false);
         m_drawPressed = false;
         m_panning = true; m_panButton = event->button(); m_lastPanPosition = event->pos();
         setFocus(); updateInteractionCursor(); event->accept(); return;
@@ -396,12 +508,26 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
         m_pressPosition = event->pos(); m_dragged = false;
         event->accept(); return;
     }
+    if (m_drawingEnabled && m_activeTool == DrawingTool::Selection && event->button() == Qt::LeftButton) {
+        endShapeMove(false); setFocus();
+        auto *hit = shapeAt(event->pos());
+        const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+        if (!hit) { if (!shift) clearShapeSelection(); }
+        else if (shift) hit->setSelected(!hit->isSelected());
+        else {
+            if (!hit->isSelected()) { clearShapeSelection(); hit->setSelected(true); }
+            m_selectionPressed = true; m_selectionPressPixel = event->pos();
+            m_selectionPressMm = mapToScene(event->pos());
+            for (auto *item : selectedShapeItems()) m_moveOrigins.append({item, item->pos()});
+        }
+        notifySelection(); event->accept(); return;
+    }
     if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_ignoreDrawingRelease = false;
         m_pressPosition = event->pos(); m_dragged = false; m_drawPressed = true;
         setFocus(); event->accept(); return;
     }
-    QGraphicsView::mousePressEvent(event);
+    event->accept();
 }
 
 void DrawingView::mouseReleaseEvent(QMouseEvent *event)
@@ -409,6 +535,9 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
     if (m_panning) {
         if (event->button() == m_panButton) { m_panning = false; updateInteractionCursor(); }
         event->accept(); return;
+    }
+    if (m_selectionPressed && event->button() == Qt::LeftButton) {
+        endShapeMove(true); event->accept(); return;
     }
     if (!m_picking) {
         if (event->button() == Qt::LeftButton && m_ignoreDrawingRelease) {
@@ -455,6 +584,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
 
 void DrawingView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (!m_picking && m_activeTool == DrawingTool::Selection) { event->accept(); return; }
     if (!m_picking && m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_drawPressed = false; m_ignoreDrawingRelease = true;
         if (m_activeTool == DrawingTool::Polygon && !m_draftPoints.isEmpty()) {
@@ -474,6 +604,13 @@ void DrawingView::keyPressEvent(QKeyEvent *event)
     }
     if (m_panning && event->key() == Qt::Key_Escape) {
         m_panning = false; updateInteractionCursor(); event->accept(); return;
+    }
+    if (m_drawingEnabled && !m_picking && m_activeTool == DrawingTool::Selection) {
+        if (event->key() == Qt::Key_Escape) {
+            if (m_selectionPressed) endShapeMove(false); else clearShapeSelection();
+            event->accept(); return;
+        }
+        if (event->key() == Qt::Key_Delete) { deleteSelectedShapes(); event->accept(); return; }
     }
     if (m_drawingEnabled && !m_draftPoints.isEmpty()) {
         if (event->key() == Qt::Key_Escape) {

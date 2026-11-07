@@ -4,6 +4,8 @@
 #include "toolpalette.h"
 #include "pdfplacement.h"
 #include <QAction>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QGraphicsLineItem>
@@ -19,6 +21,127 @@
 class DrawingTests : public QObject {
     Q_OBJECT
 private slots:
+    void clickAndShiftSelection() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Rectangle); view.submitDrawingPoint({-60,-20}); view.submitDrawingPoint({-20,20});
+        view.submitDrawingPoint({20,-20}); view.submitDrawingPoint({60,20});
+        auto *first = view.shapeItems()[0], *second = view.shapeItems()[1];
+        view.setActiveTool(DrawingTool::Selection);
+        auto click = [&](QPointF p, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QTest::mouseClick(view.viewport(), Qt::LeftButton, modifiers, view.mapFromScene(p));
+        };
+        click({-40,0}); QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({first}));
+        click({40,0}, Qt::ShiftModifier); QCOMPARE(view.selectedShapeItems().size(), 2);
+        click({-40,0}, Qt::ShiftModifier); QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({second}));
+        click({0,80}, Qt::ShiftModifier); QCOMPARE(view.selectedShapeItems().size(), 1);
+        click({0,80}); QVERIFY(view.selectedShapeItems().isEmpty());
+        click({40,0}); QTest::keyClick(&view, Qt::Key_Escape); QVERIFY(view.selectedShapeItems().isEmpty());
+        view.setActiveTool(DrawingTool::Line); view.submitDrawingPoint({-60,-20}); view.submitDrawingPoint({-20,20});
+        auto *topLine = view.shapeItems().last(); view.setActiveTool(DrawingTool::Selection);
+        click({-40,0}); QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({topLine}));
+        view.setDrawingEnabled(false); click({40,0}); QTest::keyClick(&view, Qt::Key_Delete);
+        QCOMPARE(view.shapeItems().size(), 3); QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({topLine}));
+    }
+    void polygonSelectionFollowsOutline() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Polygon);
+        for (QPointF point : {QPointF(-40,-20), QPointF(40,-20), QPointF(0,40)}) view.submitDrawingPoint(point);
+        QVERIFY(view.finishPolygon()); view.setActiveTool(DrawingTool::Selection);
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({35,30}));
+        QVERIFY(view.selectedShapeItems().isEmpty());
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({0,0}));
+        QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({view.shapeItems().first()}));
+    }
+    void groupMoveAndRollback() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Rectangle); view.submitDrawingPoint({-60,-20}); view.submitDrawingPoint({-20,20});
+        view.setActiveTool(DrawingTool::Circle); view.submitDrawingPoint({40,0}); view.submitDrawingPoint({50,0});
+        view.setActiveTool(DrawingTool::Selection);
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({-40,0}));
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::ShiftModifier, view.mapFromScene({40,0}));
+        const QPoint start = view.mapFromScene({-40,0}), end = start+QPoint(50,-35);
+        const QPointF delta = view.mapToScene(end)-view.mapToScene(start);
+        auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(view.shapeItems()[0]); const QRectF geometry = rect->rect();
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(view.viewport(), end); QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, end);
+        for (auto *item : view.shapeItems()) QCOMPARE(item->pos(), delta);
+        QCOMPARE(rect->rect(), geometry);
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(view.grab().save("step2-selection.png"));
+        const QPoint moved = view.mapFromScene(QPointF(-40,0)+delta);
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, moved);
+        QTest::mouseMove(view.viewport(), moved+QPoint(50,40));
+        QVERIFY(rect->pos() != delta); QTest::keyClick(&view, Qt::Key_Escape);
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, moved+QPoint(50,40));
+        for (auto *item : view.shapeItems()) QCOMPARE(item->pos(), delta);
+        QVERIFY(settings.setScaleDenominator(50)); QVERIFY(view.setDisplayZoom(2));
+        for (auto *item : view.shapeItems()) QCOMPARE(item->pos(), delta);
+        QCOMPARE(rect->rect(), geometry);
+        // A tool change also rolls back an unfinished move.
+        const QPoint current = view.mapFromScene(QPointF(-40,0)+delta);
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, current);
+        QTest::mouseMove(view.viewport(), current+QPoint(60,0)); view.setActiveTool(DrawingTool::Line);
+        for (auto *item : view.shapeItems()) QCOMPARE(item->pos(), delta);
+    }
+    void screenToleranceAndMoveLimit() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Line); view.submitDrawingPoint({-100,0}); view.submitDrawingPoint({100,0});
+        auto *line = view.shapeItems().first(); view.setActiveTool(DrawingTool::Selection);
+        for (double scale : {1.0, 50.0}) {
+            QVERIFY(settings.setScaleDenominator(scale));
+            const QPoint pixel = view.mapFromScene({0,0})+QPoint(0,5);
+            QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, pixel);
+            QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({line}));
+            view.clearShapeSelection();
+        }
+        // A group move that would exceed the coordinate limit is rejected as a whole.
+        line->setPos({9999900,0}); view.setContentBounds({9999700,-100,500,200}); view.centerOn({9999900,0});
+        const QPoint start = view.mapFromScene({9999900,0});
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QCOMPARE(view.selectedShapeItems(), QList<QGraphicsItem*>({line}));
+        QTest::mouseMove(view.viewport(), start+QPoint(100,0));
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, start+QPoint(100,0));
+        QCOMPARE(line->pos(), QPointF(9999900,0));
+    }
+    void deletionAndContextMenu() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Line); view.submitDrawingPoint({-60,0}); view.submitDrawingPoint({-20,0});
+        view.submitDrawingPoint({20,0}); view.submitDrawingPoint({60,0});
+        view.submitDrawingPoint({-60,40}); view.submitDrawingPoint({-20,40});
+        const int backgroundItems = view.scene()->items().size()-3;
+        view.setActiveTool(DrawingTool::Selection);
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({-40,0}));
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::ShiftModifier, view.mapFromScene({-40,40}));
+        QCOMPARE(view.selectedShapeItems().size(), 2);
+        QTest::keyClick(&view, Qt::Key_Delete); QCOMPARE(view.shapeItems().size(), 1);
+        QVERIFY(view.selectedShapeItems().isEmpty());
+        const QPoint pixel = view.mapFromScene({40,0});
+        QContextMenuEvent event(QContextMenuEvent::Mouse, pixel, view.viewport()->mapToGlobal(pixel));
+        QApplication::sendEvent(view.viewport(), &event);
+        auto *menu = view.findChild<QMenu*>("shapeSelectionMenu"); QVERIFY(menu && menu->isVisible());
+        auto *action = menu->findChild<QAction*>("deleteSelectedShapesAction"); QVERIFY(action && action->isEnabled());
+        QCOMPARE(view.selectedShapeItems().size(), 1); action->trigger(); menu->hide();
+        QVERIFY(view.shapeItems().isEmpty()); QCOMPARE(view.scene()->items().size(), backgroundItems);
+        QVERIFY(!view.deleteSelectedShapes());
+        // Bounds and pointer lists remain valid after removal and subsequent drawing.
+        view.setActiveTool(DrawingTool::Circle); view.submitDrawingPoint({0,0}); view.submitDrawingPoint({10,0});
+        QCOMPARE(view.shapeItems().size(), 1); QVERIFY(settings.setScaleDenominator(100));
+    }
+    void pdfPickingAndPanDoNotEdit() {
+        DrawingSettings settings; DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        view.setActiveTool(DrawingTool::Rectangle); view.submitDrawingPoint({-20,-20}); view.submitDrawingPoint({20,20});
+        auto *item = view.shapeItems().first(); view.setActiveTool(DrawingTool::Selection);
+        const QPoint start = view.mapFromScene({0,0});
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mousePress(view.viewport(), Qt::MiddleButton, Qt::NoModifier, start);
+        QTest::mouseMove(view.viewport(), start+QPoint(30,20));
+        QTest::mouseRelease(view.viewport(), Qt::MiddleButton, Qt::NoModifier, start+QPoint(30,20));
+        QCOMPARE(item->pos(), QPointF());
+        view.startDistancePick(DrawingView::DistanceKind::Target, {});
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({0,0}));
+        QTest::keyClick(&view, Qt::Key_Delete); QCOMPARE(view.shapeItems().size(), 1);
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.mapFromScene({30,0}));
+        QCOMPARE(item->pos(), QPointF()); QCOMPARE(view.selectedShapeItems().size(), 1);
+    }
     void exactGeometryAndScale() {
         DrawingSettings settings; DrawingView view(&settings);
         QVERIFY(view.setActiveTool(DrawingTool::Line));

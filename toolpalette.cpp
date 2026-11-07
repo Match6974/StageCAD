@@ -123,9 +123,8 @@ ToolPalette::ToolPalette(QWidget *parent) : QWidget(parent)
         action->setProperty("featureId", QString::fromLatin1(item.featureId));
         action->setProperty("drawingTool", QVariant::fromValue(item.tool));
         action->setCheckable(true); action->setEnabled(item.available);
-        const bool modeOnly = item.tool == DrawingTool::Selection;
         action->setToolTip(tr(item.name) + (!item.available ? tr("（未対応）")
-            : modeOnly ? tr("（現在はモード切替のみ）") : QString()));
+            : QString()));
         connect(action, &QAction::triggered, this, [this, tool = item.tool] { setCurrentTool(tool); });
         auto *button = new QToolButton(m_content);
         button->setDefaultAction(action); button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);

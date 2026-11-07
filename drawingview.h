@@ -7,6 +7,7 @@
 #include <QPolygonF>
 
 class DrawingSettings;
+class QMenu;
 class QGraphicsRectItem;
 
 // Scene positions are CAD mm, never pixels or paper mm.
@@ -29,6 +30,9 @@ public:
     bool canFinishPolygon() const;
     QString drawingHint() const;
     const QList<QGraphicsItem*> &shapeItems() const { return m_shapes; }
+    QList<QGraphicsItem*> selectedShapeItems() const;
+    void clearShapeSelection();
+    bool deleteSelectedShapes();
     static constexpr int ShapeToolRole = 0x5343;
     enum class DistanceKind { Current, Target };
     Q_ENUM(DistanceKind)
@@ -47,6 +51,7 @@ signals:
     void drawingStateChanged();
     void drawingHintChanged(const QString &text);
     void shapeCreated(DrawingTool tool);
+    void shapeSelectionChanged();
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -54,6 +59,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
     void leaveEvent(QEvent *event) override;
@@ -70,6 +76,11 @@ private:
     bool isDrawingTool() const;
     bool commitShape(QPointF secondMm);
     bool nearDraftVertex(QPointF pointMm, QPointF vertexMm) const;
+
+    QGraphicsItem *shapeAt(QPoint viewportPoint) const;
+    void notifySelection();
+    void endShapeMove(bool commit);
+    void registerShape(QGraphicsItem *item);
 
     DrawingSettings *m_settings;
     QGraphicsRectItem *m_paper;
@@ -97,6 +108,12 @@ private:
     QPolygonF m_draftPoints;
     std::optional<QPointF> m_draftHover;
     QList<QGraphicsItem*> m_shapes;
+    QMenu *m_selectionMenu;
+    bool m_selectionPressed = false;
+    bool m_movingShapes = false;
+    QPoint m_selectionPressPixel;
+    QPointF m_selectionPressMm;
+    QList<QPair<QGraphicsItem*, QPointF>> m_moveOrigins;
 };
 
 #endif

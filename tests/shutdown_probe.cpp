@@ -8,6 +8,7 @@
 #include <QFileDialog>
 #include <QDockWidget>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTimer>
@@ -60,6 +61,23 @@ int main(int argc, char **argv)
             auto *view = w.findChild<DrawingView*>();
             view->setActiveTool(DrawingTool::Polygon);
             view->submitDrawingPoint({0, 0}); view->submitDrawingPoint({20, 0}); view->submitDrawingPoint({10, 20});
+        }
+        if (scenario == "selected-shapes" || scenario == "moving-shapes") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            auto *view = w.findChild<DrawingView*>();
+            view->setActiveTool(DrawingTool::Rectangle);
+            view->submitDrawingPoint({-20, -20}); view->submitDrawingPoint({20, 20});
+            view->setActiveTool(DrawingTool::Selection);
+            const QPointF point = view->mapFromScene({0, 0});
+            QMouseEvent press(QEvent::MouseButtonPress, point, view->viewport()->mapToGlobal(point),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(view->viewport(), &press);
+            if (scenario == "moving-shapes") {
+                const QPointF end = point + QPointF(50, 40);
+                QMouseEvent move(QEvent::MouseMove, end, view->viewport()->mapToGlobal(end),
+                                 Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(view->viewport(), &move);
+            }
         }
         if (!w.close()) app.exit(6);
     });
