@@ -5,16 +5,23 @@
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
+#include "toolpalette.h"
 #include <QAction>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMenuBar>
+#include <QMenu>
 #include <QPdfDocument>
 #include <QPdfPageNavigator>
 #include <QPdfView>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QPushButton>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
@@ -106,7 +113,75 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_zoomInAction, &QAction::triggered, this, [this] {
         m_drawingView->setDisplayZoom(m_drawingView->displayZoom() * 1.25);
     });
-    connect(m_fitPaperAction, &QAction::triggered, this, [this] { m_drawingView->setDisplayZoom(1); });
+    connect(m_fitPaperAction, &QAction::triggered, this, [this] { m_drawingView->resetView(); });
+
+    auto *toolDock = new QDockWidget(tr("基本パレット"), this);
+    toolDock->setObjectName("basicToolDock");
+    toolDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    toolDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    m_toolPalette = new ToolPalette(toolDock);
+    toolDock->setWidget(m_toolPalette);
+    addDockWidget(Qt::LeftDockWidgetArea, toolDock);
+    resizeDocks({toolDock}, {180}, Qt::Horizontal);
+    auto *viewMenu = menuBar()->addMenu(tr("表示"));
+    viewMenu->addAction(toolDock->toggleViewAction());
+
+    addToolBarBreak(Qt::TopToolBarArea);
+    m_toolOptionsToolbar = addToolBar(tr("ツール"));
+    m_toolOptionsToolbar->setObjectName("toolOptionsToolbar");
+    m_toolOptionsToolbar->setMovable(false);
+    m_toolModeLabel = new QLabel(m_toolOptionsToolbar);
+    m_toolModeLabel->setObjectName("activeToolModeLabel");
+    auto showMode = [this](DrawingTool tool) {
+        m_toolModeLabel->setText(ToolPalette::toolName(tool) + QStringLiteral(" / ") + ToolPalette::modeText(tool));
+    };
+    m_toolOptionsToolbar->addWidget(m_toolModeLabel);
+    m_pointInputPanel = new QWidget(m_toolOptionsToolbar);
+    m_pointInputPanel->setObjectName("drawingPointPanel");
+    auto *pointLayout = new QHBoxLayout(m_pointInputPanel);
+    pointLayout->setContentsMargins(8, 0, 0, 0); pointLayout->setSpacing(4);
+    m_xPointInput = new QDoubleSpinBox(m_pointInputPanel);
+    m_yPointInput = new QDoubleSpinBox(m_pointInputPanel);
+    m_xPointInput->setObjectName("drawingXInput");
+    m_yPointInput->setObjectName("drawingYInput");
+    m_xPointInput->setPrefix(tr("X: ")); m_yPointInput->setPrefix(tr("Y: "));
+    m_xPointInput->setAccessibleName(tr("X座標（実寸mm）"));
+    m_yPointInput->setAccessibleName(tr("Y座標（実寸mm）"));
+    for (auto *input : {m_xPointInput, m_yPointInput}) {
+        input->setRange(-10000000, 10000000); input->setDecimals(6);
+        input->setSuffix(tr(" mm")); input->setKeyboardTracking(false);
+        input->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        input->setMinimumWidth(130);
+        pointLayout->addWidget(input);
+    }
+    m_addPointButton = new QPushButton(tr("点を指定"), m_pointInputPanel);
+    m_addPointButton->setObjectName("submitDrawingPointButton"); pointLayout->addWidget(m_addPointButton);
+    m_finishPolygonButton = new QPushButton(tr("多角形を完了"), m_pointInputPanel);
+    m_finishPolygonButton->setObjectName("finishPolygonButton"); pointLayout->addWidget(m_finishPolygonButton);
+    m_toolOptionsToolbar->addWidget(m_pointInputPanel);
+    connect(m_addPointButton, &QPushButton::clicked, this, [this] {
+        if (!m_xPointInput->hasAcceptableInput() || !m_yPointInput->hasAcceptableInput()) return;
+        m_xPointInput->interpretText(); m_yPointInput->interpretText();
+        if (m_drawingView->submitDrawingPoint({m_xPointInput->value(), m_yPointInput->value()}))
+            m_drawingView->setFocus();
+    });
+    connect(m_finishPolygonButton, &QPushButton::clicked, this, [this] {
+        if (m_drawingView->finishPolygon()) m_drawingView->setFocus();
+    });
+    connect(m_toolPalette, &ToolPalette::toolChanged, this, [this, showMode](DrawingTool tool) {
+        if (m_pdfCalibrationDialog || !m_drawingView->setActiveTool(tool)) {
+            QSignalBlocker block(m_toolPalette);
+            m_toolPalette->setCurrentTool(m_drawingView->activeTool());
+            return;
+        }
+        showMode(tool);
+    });
+    connect(m_drawingView, &DrawingView::activeToolChanged, m_toolPalette, &ToolPalette::setCurrentTool);
+    connect(m_drawingView, &DrawingView::activeToolChanged, this, &MainWindow::updateDrawingControls);
+    connect(m_drawingView, &DrawingView::drawingStateChanged, this, &MainWindow::updateDrawingControls);
+    connect(m_drawingView, &DrawingView::drawingHintChanged, m_toolPalette, &ToolPalette::setToolHint);
+    m_toolPalette->setToolHint(m_drawingView->drawingHint());
+    showMode(m_toolPalette->currentTool());
 
     m_coordinates = new QLabel(this); m_coordinates->setObjectName("coordinatesLabel");
     m_paperCoverage = new QLabel(this); m_paperCoverage->setObjectName("paperCoverageLabel");
@@ -182,7 +257,7 @@ bool MainWindow::importPdf(const QString &path, QString *error)
         m_pdfPageInput->setRange(1, m_pdfDocument->pageCount()); m_pdfPageInput->setValue(1);
     }
     m_pdfPageCount->setText(tr(" / %1 ").arg(m_pdfDocument->pageCount()));
-    m_drawingView->clearDistancePick(); m_drawingView->setDisplayZoom(1);
+    m_drawingView->clearDistancePick(); m_drawingView->resetView();
     setWindowTitle(tr("%1 — StageCAD").arg(QFileInfo(path).fileName()));
     m_tabs->setCurrentIndex(0); updatePdfActions();
     return true;
@@ -256,12 +331,27 @@ void MainWindow::updatePdfActions()
 {
     const bool idle = !m_pdfCalibrationDialog;
     const bool workspace = m_tabs->currentIndex() == 0;
+    m_drawingView->setDrawingEnabled(idle && workspace);
+    updateDrawingControls();
+    m_toolPalette->setEnabled(idle && workspace);
+    m_toolOptionsToolbar->setEnabled(idle && workspace);
     m_importPdfAction->setEnabled(idle);
     m_calibratePdfAction->setEnabled(idle && workspace && m_pdfPlacement->hasPage());
     m_scaleAction->setEnabled(idle && workspace);
     m_pdfPageInput->setEnabled(idle && m_pdfDocument && m_pdfDocument->pageCount() > 1);
     m_tabs->tabBar()->setEnabled(idle);
     m_zoomInAction->setEnabled(workspace); m_zoomOutAction->setEnabled(workspace); m_fitPaperAction->setEnabled(workspace);
+}
+
+void MainWindow::updateDrawingControls()
+{
+    const DrawingTool tool = m_drawingView->activeTool();
+    const bool shapeTool = tool == DrawingTool::Line || tool == DrawingTool::Rectangle
+        || tool == DrawingTool::Circle || tool == DrawingTool::Polygon;
+    m_pointInputPanel->setVisible(shapeTool);
+    m_pointInputPanel->setEnabled(shapeTool && m_drawingView->drawingEnabled() && !m_drawingView->isPickingDistance());
+    m_finishPolygonButton->setVisible(tool == DrawingTool::Polygon);
+    m_finishPolygonButton->setEnabled(m_drawingView->canFinishPolygon());
 }
 
 void MainWindow::editScale()

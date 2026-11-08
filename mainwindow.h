@@ -15,6 +15,10 @@ class QPdfView;
 class QSpinBox;
 class QTabWidget;
 class PdfCalibrationDialog;
+class ToolPalette;
+class QToolBar;
+class QDoubleSpinBox;
+class QPushButton;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -38,6 +42,7 @@ private:
     bool showPdfPage(int page, QString *error);
     void editPdfCalibration();
     void updatePdfActions();
+    void updateDrawingControls();
 
     Ui::MainWindow *ui;
     DrawingSettings *m_drawingSettings;
@@ -62,5 +67,13 @@ private:
     int m_pdfPage = 0;
     double m_importDenominator = 1;
     QString m_pdfPath;
+    ToolPalette *m_toolPalette;
+    QLabel *m_toolModeLabel;
+    QToolBar *m_toolOptionsToolbar;
+    QWidget *m_pointInputPanel;
+    QDoubleSpinBox *m_xPointInput;
+    QDoubleSpinBox *m_yPointInput;
+    QPushButton *m_addPointButton;
+    QPushButton *m_finishPolygonButton;
 };
 #endif // MAINWINDOW_H
