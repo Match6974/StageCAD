@@ -64,6 +64,8 @@ private:
     void updatePdfActions();
     /// @brief 現在のツールと作成状態に応じて、座標入力・多角形完了ボタンを更新する。
     void updateDrawingControls();
+    /// @brief 選択モデルから件数・単独選択の種類を読み取り、状態欄を更新する。
+    void updateSelectionDisplay();
 
     // ui: Qt Designer生成のUI補助オブジェクト。MainWindowのデストラクタで解放する。
     Ui::MainWindow *ui;
@@ -75,6 +77,8 @@ private:
     QLabel *m_scaleLabel;
     // m_coordinates: カーソルの実寸座標を表示するラベル。メイン画面が所有する。
     QLabel *m_coordinates;
+    // m_selectionStatus: メイン画面が所有する、現在の選択数と種類を示すラベル。
+    QLabel *m_selectionStatus;
     // m_paperCoverage: 用紙が覆う実寸mm範囲を表示するラベル。メイン画面が所有する。
     QLabel *m_paperCoverage;
     // m_pdfPlacement: メイン画面が子QObjectとして所有するPDF配置モデル。

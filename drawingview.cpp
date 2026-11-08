@@ -6,6 +6,7 @@
 #include "drawingview.h"
 #include "drawingsettings.h"
 #include "drawingdocument.h"
+#include "shapeselectionmodel.h"
 
 #include <QGraphicsRectItem>
 #include <QGraphicsLineItem>
@@ -88,6 +89,14 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
     m_document = new DrawingDocument(this); m_document->setObjectName("drawingDocument");
+    m_selectionModel = new ShapeSelectionModel(m_document, this);
+    m_selectionModel->setObjectName("shapeSelectionModel");
+    // コールバック: 外部からの選択変更でも未確定移動を取り消し、表示と通知を更新する。
+    connect(m_selectionModel, &ShapeSelectionModel::selectionChanged, this, [this] {
+        endShapeMove(false); syncSelectionDisplay();
+        emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
+    });
+    connect(scene(), &QGraphicsScene::selectionChanged, this, &DrawingView::syncSelectionDisplay);
     // コールバック: モデル変更の前に移動プレビューを取り消し、変更前の表示へ戻す。
     connect(m_document, &DrawingDocument::aboutToChange, this, [this] { endShapeMove(false); });
     connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
@@ -123,6 +132,17 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
 
     connect(settings, &DrawingSettings::scaleChanged, this, &DrawingView::updatePaper);
     updatePaper();
+}
+
+/// @brief Qtの基底ビューがシーンを切り離す際、破棄済みの派生メンバーへ通知させない。
+DrawingView::~DrawingView()
+{
+    disconnect(scene(), nullptr, this, nullptr);
+    disconnect(m_document, nullptr, this, nullptr);
+    disconnect(horizontalScrollBar(), nullptr, this, nullptr);
+    disconnect(verticalScrollBar(), nullptr, this, nullptr);
+    // 文書破棄による選択解除通知より先にモデルを解放する。Qtの子リストからも自動で外れる。
+    delete m_selectionModel;
 }
 
 /// @brief 有効なズーム倍率を設定する。実寸座標を保ち、不正倍率ではfalseを返す。
@@ -352,7 +372,7 @@ void DrawingView::removeShapeItem(const QUuid &id)
     auto *item = m_shapeGraphics.take(id);
     if (!item) return;
     m_shapes.removeOne(item); delete item;
-    updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
+    updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
 }
 
 /// @brief 現在選択されている、管理対象の表示アイテムを描画順で返す。
@@ -361,23 +381,26 @@ QList<QGraphicsItem*> DrawingView::selectedShapeItems() const
     // result: 描画順に集める選択済みアイテムの参照リスト。所有権はシーンに残る。
     QList<QGraphicsItem*> result;
     // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
-    for (auto *item : m_shapes) if (item->isSelected()) result.append(item);
+    for (auto *item : m_shapes) if (m_selectionModel->contains(shapeId(item))) result.append(item);
     return result;
 }
 
-/// @brief 選択表示の再描画と選択状態・操作案内の変更を通知する。
-void DrawingView::notifySelection()
+/// @brief 選択IDの正本をQt描画アイテムへ反映し、逆方向の再入を抑える。
+void DrawingView::syncSelectionDisplay()
 {
-    viewport()->update(); emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
+    if (m_syncingSelection) return;
+    // syncing: アイテムの選択フラグ変更によるシーン通知をこのスコープだけ抑制する。
+    QScopedValueRollback<bool> syncing(m_syncingSelection, true);
+    // item: シーンが所有する表示アイテム。選択モデルに一致する見た目だけを設定する。
+    for (auto *item : m_shapes) item->setSelected(m_selectionModel->contains(shapeId(item)));
+    viewport()->update();
 }
 
 /// @brief 未確定の移動を取り消し、全図形の選択を解除する。
 void DrawingView::clearShapeSelection()
 {
     endShapeMove(false);
-    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
-    for (auto *item : m_shapes) item->setSelected(false);
-    notifySelection();
+    m_selectionModel->clear();
 }
 
 /// @brief 画面座標から手前の図形を探す。細線も6pxの許容幅で判定する。
@@ -452,9 +475,7 @@ void DrawingView::contextMenuEvent(QContextMenuEvent *event)
     endShapeMove(false);
     // hit: クリック位置で見つかった最前面の図形アイテム。
     auto *hit = shapeAt(event->pos());
-    if (hit && !hit->isSelected()) {
-        clearShapeSelection(); hit->setSelected(true); notifySelection();
-    }
+    if (hit && !m_selectionModel->contains(shapeId(hit))) m_selectionModel->selectOnly(shapeId(hit));
     m_selectionMenu->actions().first()->setEnabled(!selectedShapeItems().isEmpty());
     m_selectionMenu->popup(event->globalPos()); event->accept();
 }
@@ -678,15 +699,15 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
         // shift: 押下時にShiftが指定されているかどうか。
         const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
         if (!hit) { if (!shift) clearShapeSelection(); }
-        else if (shift) hit->setSelected(!hit->isSelected());
+        else if (shift) m_selectionModel->toggle(shapeId(hit));
         else {
-            if (!hit->isSelected()) { clearShapeSelection(); hit->setSelected(true); }
+            if (!m_selectionModel->contains(shapeId(hit))) m_selectionModel->selectOnly(shapeId(hit));
             m_selectionPressed = true; m_selectionPressPixel = event->pos();
             m_selectionPressMm = mapToScene(event->pos());
             // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
             for (auto *item : selectedShapeItems()) m_moveOrigins.append({item, item->pos()});
         }
-        notifySelection(); event->accept(); return;
+        event->accept(); return;
     }
     if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_ignoreDrawingRelease = false;

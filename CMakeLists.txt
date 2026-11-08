@@ -12,6 +12,8 @@ qt_standard_project_setup()
 
 # アプリ本体とGUI回帰テストで共用する、手書きの実装・宣言ファイル。
 set(STAGECAD_SOURCES
+    shapeselectionmodel.h
+    shapeselectionmodel.cpp
     shapedata.h
     shapedata.cpp
     drawingdocument.h
@@ -116,6 +118,15 @@ if(BUILD_TESTING)
     target_link_libraries(stagecad_document_tests PRIVATE Qt::Core Qt::Gui Qt::Test)
     add_test(NAME stagecad_document_tests COMMAND stagecad_document_tests)
     set_tests_properties(stagecad_document_tests PROPERTIES TIMEOUT 30)
+
+    # 選択状態の検証はQCoreApplicationのみで実行し、表示アイテムへ依存しないことも確認する。
+    qt_add_executable(stagecad_selection_tests tests/test_selection.cpp
+        shapeselectionmodel.cpp shapeselectionmodel.h
+        shapedata.cpp shapedata.h drawingdocument.cpp drawingdocument.h)
+    target_include_directories(stagecad_selection_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(stagecad_selection_tests PRIVATE Qt::Core Qt::Gui Qt::Test)
+    add_test(NAME stagecad_selection_tests COMMAND stagecad_selection_tests)
+    set_tests_properties(stagecad_selection_tests PROPERTIES TIMEOUT 30)
 
     qt_add_executable(stagecad_shutdown_probe
         tests/shutdown_probe.cpp

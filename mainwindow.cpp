@@ -7,6 +7,7 @@
 #include "ui_mainwindow.h"
 #include "drawingsettings.h"
 #include "drawingview.h"
+#include "shapeselectionmodel.h"
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
@@ -221,6 +222,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_coordinates = new QLabel(this); m_coordinates->setObjectName("coordinatesLabel");
     m_paperCoverage = new QLabel(this); m_paperCoverage->setObjectName("paperCoverageLabel");
     statusBar()->addWidget(m_coordinates, 1); statusBar()->addPermanentWidget(m_paperCoverage);
+    m_selectionStatus = new QLabel(this); m_selectionStatus->setObjectName("selectionStatusLabel");
+    statusBar()->addPermanentWidget(m_selectionStatus);
+    connect(m_drawingView->selectionModel(), &ShapeSelectionModel::selectionChanged,
+            this, &MainWindow::updateSelectionDisplay);
+    updateSelectionDisplay();
     // point: 用紙中心基準の実寸座標（mm）。
     // コールバック: カーソルの実寸X/Yを小数点以下2桁でステータス欄へ表示する。
     connect(m_drawingView, &DrawingView::cursorPositionChanged, this, [this](QPointF point) {
@@ -411,6 +417,7 @@ void MainWindow::updatePdfActions()
     // workspace: CAD作業領域タブが現在選択されているかどうか。
     const bool workspace = m_tabs->currentIndex() == 0;
     m_drawingView->setDrawingEnabled(idle && workspace);
+    m_selectionStatus->setVisible(workspace);
     updateDrawingControls();
     m_toolPalette->setEnabled(idle && workspace);
     m_toolOptionsToolbar->setEnabled(idle && workspace);
@@ -434,6 +441,28 @@ void MainWindow::updateDrawingControls()
     m_pointInputPanel->setEnabled(shapeTool && m_drawingView->drawingEnabled() && !m_drawingView->isPickingDistance());
     m_finishPolygonButton->setVisible(tool == DrawingTool::Polygon);
     m_finishPolygonButton->setEnabled(m_drawingView->canFinishPolygon());
+}
+
+/// @brief 選択モデルの現在値から、選択件数と単独図形の種類を表示する。
+void MainWindow::updateSelectionDisplay()
+{
+    // selection: ビュー所有の選択モデル。表示アイテムへの参照は持ち込まない。
+    const auto *selection = m_drawingView->selectionModel();
+    // single: 単独選択の場合だけ取得できる、現在の図形データのコピー。
+    const auto single = selection->singleShape();
+    if (!single) {
+        m_selectionStatus->setText(tr("選択: %1個").arg(selection->count()));
+        return;
+    }
+    // name: 単独選択している図形の種類を示す表示文字列。
+    QString name;
+    switch (single->kind()) {
+    case ShapeKind::Line: name = tr("直線"); break;
+    case ShapeKind::Rectangle: name = tr("四角"); break;
+    case ShapeKind::Circle: name = tr("円"); break;
+    case ShapeKind::Polygon: name = tr("多角形"); break;
+    }
+    m_selectionStatus->setText(tr("選択: %1（1個）").arg(name));
 }
 
 /// @brief 縮尺ダイアログを開き、OKで確定された場合だけ作業領域の設定へ反映する。

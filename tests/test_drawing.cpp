@@ -5,6 +5,7 @@
 
 #include "drawingview.h"
 #include "drawingdocument.h"
+#include "shapeselectionmodel.h"
 #include "drawingsettings.h"
 #include "mainwindow.h"
 #include "toolpalette.h"
@@ -12,6 +13,9 @@
 #include <QAction>
 #include <QContextMenuEvent>
 #include <QMenu>
+#include <QLabel>
+#include <QSignalSpy>
+#include "pdfcalibrationdialog.h"
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QGraphicsLineItem>
@@ -28,6 +32,85 @@
 class DrawingTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
+    void selectionIdsDriveDisplayAndNotifications() {
+        // settings: 実寸座標と用紙の換算に使う設定モデル。
+        DrawingSettings settings;
+        // view: 選択モデルと表示アイテムを接続して検証するビュー。
+        DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        // document: ビューが所有する確定図形モデル。
+        auto *document = view.document();
+        // first: 先頭の矩形のUUID。
+        const auto first = document->addShape(QRectF(-60,-20,40,40));
+        // second: 次に描画する円のUUID。
+        const auto second = document->addShape(CircleGeometry{{40,0},10});
+        // selection: 表示フラグではなくUUID集合を正本とする選択モデル。
+        auto *selection = view.selectionModel();
+        // changed: ビュー互換の通知も、実際の選択変更と1対1であることを確認する。
+        QSignalSpy changed(&view, &DrawingView::shapeSelectionChanged);
+        QVERIFY(selection->setSelectedIds({second,first})); QCOMPARE(changed.count(), 1);
+        QCOMPARE(selection->selectedIds(), QList<QUuid>({first,second}));
+        // item: 選択表示に反映されていることを確認するシーン所有アイテム。
+        for (auto *item : view.shapeItems()) QVERIFY(item->isSelected());
+        QVERIFY(selection->setSelectedIds({first,second,first})); QCOMPARE(changed.count(), 1);
+        view.shapeItems().first()->setSelected(false);
+        QVERIFY(view.shapeItems().first()->isSelected()); QCOMPARE(changed.count(), 1);
+        // start: 選択済み矩形の内部を押す位置（画面px）。
+        const QPoint start = view.mapFromScene({-40,0});
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QCOMPARE(changed.count(), 1); QCOMPARE(selection->count(), 2);
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(view.viewport(), start+QPoint(40,20));
+        QVERIFY(view.shapeItems().first()->pos() != QPointF());
+        QVERIFY(selection->selectOnly(second)); QCOMPARE(changed.count(), 2);
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, start+QPoint(40,20));
+        QCOMPARE(document->shape(first)->positionMm, QPointF());
+        QCOMPARE(view.shapeItems().first()->pos(), QPointF());
+        QVERIFY(document->removeShapes({first})); QCOMPARE(changed.count(), 2);
+        QVERIFY(document->removeShapes({second})); QCOMPARE(changed.count(), 3);
+        QVERIFY(selection->selectedIds().isEmpty()); QVERIFY(view.selectedShapeItems().isEmpty());
+    }
+    /// @brief 選択件数・種類の表示と、PDF参照・補正中に選択が維持されることを検証する。
+    void selectionStatusAndPdfGuards() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        // startup: 起動時のPDF選択をキャンセルする自動応答タイマー。
+        QTimer startup;
+        // コールバック: 起動ダイアログを閉じ、空の作業領域で状態表示を検証する。
+        connect(&startup, &QTimer::timeout, [] {
+            // widget: トップレベルの画面を走査する、所有しない参照。
+            for (auto *widget : QApplication::topLevelWidgets()) {
+                // dialog: 見つかったファイル選択ダイアログ。所有権は取得しない。
+                if (auto *dialog = qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+            }
+        });
+        startup.start(20);
+        // window: 選択状態欄とPDF操作を統合して検証するメイン画面。
+        MainWindow window; startup.stop(); window.show(); QTest::qWait(10);
+        // view: メイン画面が所有するCADビュー。
+        auto *view = window.findChild<DrawingView*>();
+        // status: 選択モデルの件数・種類を表示する状態欄。
+        auto *status = window.findChild<QLabel*>("selectionStatusLabel");
+        // tabs: 作業領域とPDF参照を切り替えるタブ。
+        auto *tabs = window.findChild<QTabWidget*>("workspaceTabs");
+        QVERIFY(view && status && tabs); QVERIFY(status->text().contains("0"));
+        // first: 単独選択時に種類が表示される円のUUID。
+        const auto first = view->document()->addShape(CircleGeometry{{-40,0},15});
+        // second: 複数選択状態を作る矩形のUUID。
+        const auto second = view->document()->addShape(QRectF(20,-20,40,40));
+        QVERIFY(view->selectionModel()->selectOnly(first)); QVERIFY(status->text().contains(QString::fromUtf8("円")));
+        QVERIFY(view->selectionModel()->toggle(second)); QVERIFY(status->text().contains("2"));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-selection.png"));
+        tabs->setCurrentIndex(1); QVERIFY(!status->isVisible()); QVERIFY(!view->deleteSelectedShapes());
+        QCOMPARE(view->selectionModel()->count(), 2); tabs->setCurrentIndex(0); QVERIFY(status->isVisible());
+        QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
+        window.findChild<QAction*>("calibratePdfAction")->trigger();
+        // dialog: 開いている補正画面。操作制限を解除するためにキャンセルする。
+        auto *dialog = window.findChild<PdfCalibrationDialog*>(); QVERIFY(dialog);
+        QVERIFY(!view->deleteSelectedShapes()); QCOMPARE(view->selectionModel()->count(), 2);
+        dialog->reject(); QCOMPARE(view->selectionModel()->count(), 2);
+        QTest::keyClick(view, Qt::Key_Escape); QVERIFY(status->text().contains("0"));
+        QVERIFY(view->selectedShapeItems().isEmpty());
+    }
     /// @brief モデル側の変更が表示へ反映され、ドラッグ中の削除でも参照が残らないことを検証する。
     void modelCommandsSynchronizeView() {
         // settings: 作業領域の縮尺・用紙設定。参照先は呼び出し側が管理する。
