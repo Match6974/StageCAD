@@ -10,6 +10,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
 
 qt_standard_project_setup()
 
+# アプリ本体とGUI回帰テストで共用する、手書きの実装・宣言ファイル。
 set(STAGECAD_SOURCES
     shapedata.h
     shapedata.cpp
@@ -55,6 +56,7 @@ install(TARGETS PDFOpen
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+# deploy_scriptにはQtが生成する配布用スクリプトのパスが格納される。
 qt_generate_deploy_app_script(
     TARGET PDFOpen
     OUTPUT_SCRIPT deploy_script
@@ -62,6 +64,7 @@ qt_generate_deploy_app_script(
 )
 install(SCRIPT ${deploy_script})
 
+# BUILD_TESTINGで検証用ターゲットの有無を切り替える。通常のアプリ実行ではOFFにできる。
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
@@ -122,6 +125,7 @@ if(BUILD_TESTING)
     target_compile_definitions(stagecad_shutdown_probe PRIVATE
         SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
     target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
+    # scenarioは終了時の操作状態名。状態ごとに別プロセスで破棄処理を検証する。
     foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft selected-shapes moving-shapes)
         add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
         set_tests_properties(shutdown_${scenario} PROPERTIES

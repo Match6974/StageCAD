@@ -1,3 +1,8 @@
+/**
+ * @file drawingdocument.h
+ * @brief 確定済み図形のID・描画順と、追加・移動・削除の変更通知を管理する。
+ */
+
 #ifndef DRAWINGDOCUMENT_H
 #define DRAWINGDOCUMENT_H
 
@@ -8,25 +13,50 @@
 
 // Owns committed CAD data without depending on a scene or widget. DrawingView
 // owns only its rendering items and temporary interaction previews.
+/// @brief 確定済み図形を所有するモデル。シーンやウィジェットを持たず、変更を通知する。
 class DrawingDocument : public QObject {
     Q_OBJECT
 public:
+    /// @brief 親QObjectを設定して、空の図形モデルを作る。
+    /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
     explicit DrawingDocument(QObject *parent = nullptr) : QObject(parent) {}
+    /// @brief 描画順に並んだ確定済み図形を読み取り専用で参照する。
     const QList<ShapeData> &shapes() const { return m_shapes; }
+    /// @brief IDに対応する図形のコピーを返す。存在しない場合は空のoptionalを返す。
+    /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     std::optional<ShapeData> shape(const QUuid &id) const;
+    /// @brief 有効な形状へ新しいUUIDを付けて追加する。不正値や再入時は空のUUIDを返す。
+    /// @param geometryMm 配置前の形状データ（実寸mm）。
     QUuid addShape(ShapeGeometry geometryMm);
+    /// @brief 対象IDと移動後の形状を全件検証する。モデルは変更しない。
+    /// @param ids 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
+    /// @param deltaMm 図形全体へ加える移動量（実寸mm）。
     bool canTranslateShapes(const QList<QUuid> &ids, QPointF deltaMm) const;
+    /// @brief 全件を検証して移動量を一括反映する。失敗時は全図形を変更しない。
+    /// @param ids 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
+    /// @param deltaMm 図形全体へ加える移動量（実寸mm）。
     bool translateShapes(const QList<QUuid> &ids, QPointF deltaMm);
+    /// @brief 存在を全件確認して図形を削除する。重複IDは1回だけ処理する。
+    /// @param ids 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
     bool removeShapes(const QList<QUuid> &ids);
 
 signals:
+    /// @brief 有効な変更の直前を通知し、ビューの未確定操作を取り消せるようにする。
     void aboutToChange();
+    /// @brief 追加された図形IDを通知する。
+    /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void shapeAdded(const QUuid &id);
+    /// @brief 移動を反映済みの図形IDを通知する。通知時は一括処理の全データが更新済み。
+    /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void shapeChanged(const QUuid &id);
+    /// @brief 削除された図形IDを通知する。
+    /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void shapeRemoved(const QUuid &id);
 
 private:
+    // m_shapes: モデルが値として所有する確定図形。描画・重なり順を保持する。
     QList<ShapeData> m_shapes; // In drawing/stacking order.
+    // m_mutating: モデルの変更通知中に入れ子の変更を受け付けないための再入防止フラグ。
     bool m_mutating = false;
 };
 

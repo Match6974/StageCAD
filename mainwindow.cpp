@@ -1,3 +1,8 @@
+/**
+ * @file mainwindow.cpp
+ * @brief 作業領域・PDF参照・各ツールのUIと操作状態を統合する。
+ */
+
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "drawingsettings.h"
@@ -32,15 +37,22 @@
 #include <memory>
 
 namespace {
+/// @brief PDFページを最大長辺2400pxの画像へ描画する。失敗時は空画像とエラーを返す。
+/// @param document PDFページ情報・画像を取得する文書。所有権は呼び出し側またはメイン画面にある。
+/// @param page 対象のPDFページ番号。モデルは0始まり、入力欄は1始まり。
+/// @param error 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
 QImage renderPage(QPdfDocument *document, int page, QString *error)
 {
+    // points: PDFページの幅・高さ（1pt=1/72インチ）。
     const QSizeF points = document->pagePointSize(page);
     if (!std::isfinite(points.width()) || !std::isfinite(points.height())
         || points.width() <= 0 || points.height() <= 0) {
         if (error) *error = QObject::tr("PDFのページ寸法が不正です。");
         return {};
     }
+    // factor: PDFのポイント寸法から画像pxへの倍率。長辺を最大2400pxに制限する。
     const double factor = std::min(2.0, 2400.0 / std::max(points.width(), points.height()));
+    // image: 描画または取り込みに使用するラスタ画像。
     QImage image = document->render(page, QSize(std::max(1, qRound(points.width() * factor)),
                                                std::max(1, qRound(points.height() * factor))));
     if (image.isNull() && error) *error = QObject::tr("PDFのページを描画できませんでした。");
@@ -48,6 +60,8 @@ QImage renderPage(QPdfDocument *document, int page, QString *error)
 }
 }
 
+/// @brief 画面・各モデル・操作を接続し、起動時のPDF選択を行う。
+/// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow)
 {
@@ -63,6 +77,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_drawingView = new DrawingView(m_drawingSettings, m_tabs);
     m_tabs->addTab(m_drawingView, tr("作業領域"));
     m_drawingView->scene()->addItem(new PdfPageItem(m_pdfPlacement));
+    // コールバック: PDFの補正・ページ更新に合わせて、作業領域の表示可能範囲を更新する。
     connect(m_pdfPlacement, &PdfPlacement::placementChanged, this, [this] {
         m_drawingView->setContentBounds(m_pdfPlacement->boundsMm());
     });
@@ -71,6 +86,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs->addTab(m_pdfView, tr("PDF参照"));
     setCentralWidget(m_tabs);
 
+    // toolbar: メイン画面が所有する、PDF・縮尺・ズーム操作のツールバー。
     auto *toolbar = addToolBar(tr("作業領域"));
     toolbar->setObjectName("drawingToolbar");
     toolbar->setMovable(false);
@@ -85,9 +101,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_pdfPageInput->setRange(1, 1);
     toolbar->addWidget(m_pdfPageInput);
     m_pdfPageCount = new QLabel(tr(" / — "), toolbar); toolbar->addWidget(m_pdfPageCount);
+    // page: 対象のPDFページ番号。モデルは0始まり、入力欄は1始まり。
+    // コールバック: 1始まりのページ入力を表示へ反映し、失敗時は元の入力番号へ戻す。
     connect(m_pdfPageInput, &QSpinBox::valueChanged, this, [this](int page) {
+        // error: 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
         QString error;
         if (!showPdfPage(page - 1, &error)) {
+            // block: 入力値の反映中にシグナルを止め、変更処理の循環を防ぐガード。
             QSignalBlocker block(m_pdfPageInput);
             m_pdfPageInput->setValue(m_pdfPage + 1);
             if (!error.isEmpty()) QMessageBox::warning(this, tr("ページ表示エラー"), error);
@@ -107,14 +127,18 @@ MainWindow::MainWindow(QWidget *parent)
     m_zoomOutAction = toolbar->addAction(tr("縮小")); m_zoomOutAction->setObjectName("zoomOutAction");
     m_zoomInAction = toolbar->addAction(tr("拡大")); m_zoomInAction->setObjectName("zoomInAction");
     m_fitPaperAction = toolbar->addAction(tr("用紙全体")); m_fitPaperAction->setObjectName("fitPaperAction");
+    // コールバック: 作業領域の表示倍率だけを1段階下げる。
     connect(m_zoomOutAction, &QAction::triggered, this, [this] {
         m_drawingView->setDisplayZoom(m_drawingView->displayZoom() / 1.25);
     });
+    // コールバック: 作業領域の表示倍率だけを1段階上げる。
     connect(m_zoomInAction, &QAction::triggered, this, [this] {
         m_drawingView->setDisplayZoom(m_drawingView->displayZoom() * 1.25);
     });
+    // コールバック: 用紙中心と基準表示倍率に戻す。
     connect(m_fitPaperAction, &QAction::triggered, this, [this] { m_drawingView->resetView(); });
 
+    // toolDock: メイン画面が所有する、基本ツールパレットのドック。
     auto *toolDock = new QDockWidget(tr("基本パレット"), this);
     toolDock->setObjectName("basicToolDock");
     toolDock->setAllowedAreas(Qt::AllDockWidgetAreas);
@@ -123,6 +147,7 @@ MainWindow::MainWindow(QWidget *parent)
     toolDock->setWidget(m_toolPalette);
     addDockWidget(Qt::LeftDockWidgetArea, toolDock);
     resizeDocks({toolDock}, {180}, Qt::Horizontal);
+    // viewMenu: パレットの再表示を提供する表示メニュー。
     auto *viewMenu = menuBar()->addMenu(tr("表示"));
     viewMenu->addAction(toolDock->toggleViewAction());
 
@@ -132,12 +157,16 @@ MainWindow::MainWindow(QWidget *parent)
     m_toolOptionsToolbar->setMovable(false);
     m_toolModeLabel = new QLabel(m_toolOptionsToolbar);
     m_toolModeLabel->setObjectName("activeToolModeLabel");
+    // showMode: ツール名とモードの表示を更新するコールバック。
+    // tool: 現在処理するツールの種類。
+    // コールバック: 新しいツールの名前とモードをツールバーへ表示する。
     auto showMode = [this](DrawingTool tool) {
         m_toolModeLabel->setText(ToolPalette::toolName(tool) + QStringLiteral(" / ") + ToolPalette::modeText(tool));
     };
     m_toolOptionsToolbar->addWidget(m_toolModeLabel);
     m_pointInputPanel = new QWidget(m_toolOptionsToolbar);
     m_pointInputPanel->setObjectName("drawingPointPanel");
+    // pointLayout: X/Y入力と点指定ボタンを横に並べるレイアウト。
     auto *pointLayout = new QHBoxLayout(m_pointInputPanel);
     pointLayout->setContentsMargins(8, 0, 0, 0); pointLayout->setSpacing(4);
     m_xPointInput = new QDoubleSpinBox(m_pointInputPanel);
@@ -147,6 +176,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_xPointInput->setPrefix(tr("X: ")); m_yPointInput->setPrefix(tr("Y: "));
     m_xPointInput->setAccessibleName(tr("X座標（実寸mm）"));
     m_yPointInput->setAccessibleName(tr("Y座標（実寸mm）"));
+    // input: 数値やファイル名の入力欄。所有権は所属する画面にある。
     for (auto *input : {m_xPointInput, m_yPointInput}) {
         input->setRange(-10000000, 10000000); input->setDecimals(6);
         input->setSuffix(tr(" mm")); input->setKeyboardTracking(false);
@@ -159,17 +189,22 @@ MainWindow::MainWindow(QWidget *parent)
     m_finishPolygonButton = new QPushButton(tr("多角形を完了"), m_pointInputPanel);
     m_finishPolygonButton->setObjectName("finishPolygonButton"); pointLayout->addWidget(m_finishPolygonButton);
     m_toolOptionsToolbar->addWidget(m_pointInputPanel);
+    // コールバック: 有効なX/Y入力を実寸mmの1点として渡し、成功したら作業領域へフォーカスを戻す。
     connect(m_addPointButton, &QPushButton::clicked, this, [this] {
         if (!m_xPointInput->hasAcceptableInput() || !m_yPointInput->hasAcceptableInput()) return;
         m_xPointInput->interpretText(); m_yPointInput->interpretText();
         if (m_drawingView->submitDrawingPoint({m_xPointInput->value(), m_yPointInput->value()}))
             m_drawingView->setFocus();
     });
+    // コールバック: 数値指定で作った多角形を閉じ、成功したら作業領域へフォーカスを戻す。
     connect(m_finishPolygonButton, &QPushButton::clicked, this, [this] {
         if (m_drawingView->finishPolygon()) m_drawingView->setFocus();
     });
+    // tool: 現在処理するツールの種類。
+    // コールバック: ツールの変更をビューへ反映し、拒否された場合はパレットの選択を戻す。
     connect(m_toolPalette, &ToolPalette::toolChanged, this, [this, showMode](DrawingTool tool) {
         if (m_pdfCalibrationDialog || !m_drawingView->setActiveTool(tool)) {
+            // block: 入力値の反映中にシグナルを止め、変更処理の循環を防ぐガード。
             QSignalBlocker block(m_toolPalette);
             m_toolPalette->setCurrentTool(m_drawingView->activeTool());
             return;
@@ -186,13 +221,18 @@ MainWindow::MainWindow(QWidget *parent)
     m_coordinates = new QLabel(this); m_coordinates->setObjectName("coordinatesLabel");
     m_paperCoverage = new QLabel(this); m_paperCoverage->setObjectName("paperCoverageLabel");
     statusBar()->addWidget(m_coordinates, 1); statusBar()->addPermanentWidget(m_paperCoverage);
+    // point: 用紙中心基準の実寸座標（mm）。
+    // コールバック: カーソルの実寸X/Yを小数点以下2桁でステータス欄へ表示する。
     connect(m_drawingView, &DrawingView::cursorPositionChanged, this, [this](QPointF point) {
         m_coordinates->setText(tr("実寸座標  X: %1 mm  Y: %2 mm")
             .arg(point.x(), 0, 'f', 2).arg(point.y(), 0, 'f', 2));
     });
+    // コールバック: カーソル退出時は座標が未指定であることを表示する。
     connect(m_drawingView, &DrawingView::cursorLeft, this, [this] {
         m_coordinates->setText(tr("実寸座標  X: — mm  Y: — mm"));
     });
+    // index: コンボボックスまたはタブで選択されたインデックス。
+    // コールバック: タブに合わせて操作可否と縮尺・座標表示の見せ方を切り替える。
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
         updatePdfActions();
         m_coordinates->setText(index == 0 ? tr("実寸座標  X: — mm  Y: — mm")
@@ -200,8 +240,14 @@ MainWindow::MainWindow(QWidget *parent)
         m_scaleLabel->setVisible(index == 0); m_paperCoverage->setVisible(index == 0);
     });
     connect(m_drawingSettings, &DrawingSettings::scaleChanged, this, &MainWindow::updateScaleDisplay);
+    // text: 表示または検証に使用する文字列。
+    // コールバック: 距離測定の案内をステータス欄へ表示する。
     connect(m_drawingView, &DrawingView::pickHintChanged, this, [this](const QString &text) { statusBar()->showMessage(text); });
     connect(m_drawingView, &DrawingView::distancePicked, this,
+        // kind: 図形の種類、または現在距離／新しい距離の測定種別。
+        // first: 用紙中心基準の実寸座標（mm）。
+        // second: 用紙中心基準の実寸座標（mm）。
+        // コールバック: 完了した2点測定を対応する入力欄へ渡し、補正ダイアログを再表示する。
         [this](DrawingView::DistanceKind kind, QPointF first, QPointF second) {
             if (!m_pdfCalibrationDialog) return;
             if (kind == DrawingView::DistanceKind::Current)
@@ -210,6 +256,7 @@ MainWindow::MainWindow(QWidget *parent)
             statusBar()->clearMessage();
             m_pdfCalibrationDialog->show(); m_pdfCalibrationDialog->raise(); m_pdfCalibrationDialog->activateWindow();
         });
+    // コールバック: 測定を中止したら案内を消し、補正ダイアログへ戻る。
     connect(m_drawingView, &DrawingView::distancePickCanceled, this, [this] {
         statusBar()->clearMessage();
         if (m_pdfCalibrationDialog) { m_pdfCalibrationDialog->show(); m_pdfCalibrationDialog->raise(); }
@@ -217,14 +264,19 @@ MainWindow::MainWindow(QWidget *parent)
     updateScaleDisplay(); updatePdfActions();
     m_coordinates->setText(tr("実寸座標  X: — mm  Y: — mm"));
 
+    // path: 読み込むPDFのファイルパス。空なら選択を取り消す。
     const QString path = QFileDialog::getOpenFileName(this, tr("PDFを選択"), {}, tr("PDF Files (*.pdf)"));
     if (!path.isEmpty()) {
+        // error: 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
         QString error;
         if (importPdf(path, &error)) m_tabs->setCurrentIndex(1); // Preserve the original startup reference display.
         else QMessageBox::warning(this, tr("PDFを開けません"), error);
     }
 }
 
+/// @brief PDFを検証・描画してから現在の文書を置き換える。失敗時は既存の表示・配置を保つ。
+/// @param path 読み込むPDFのファイルパス。空なら選択を取り消す。
+/// @param error 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
 bool MainWindow::importPdf(const QString &path, QString *error)
 {
     if (error) error->clear();
@@ -232,15 +284,19 @@ bool MainWindow::importPdf(const QString &path, QString *error)
         if (error) *error = tr("PDFの伸縮を完了またはキャンセルしてから取り込んでください。");
         return false;
     }
+    // next: 読み込み成功が確認されるまで一時所有する、新しいPDF文書。
     auto next = std::make_unique<QPdfDocument>();
+    // result: PDF読み込みの成否を表すQt PDFのエラー種別。
     const auto result = next->load(path);
     if (result != QPdfDocument::Error::None || next->status() != QPdfDocument::Status::Ready || next->pageCount() < 1) {
         if (error) *error = result == QPdfDocument::Error::IncorrectPassword
             ? tr("パスワード付きPDFには対応していません。") : tr("ファイルを開けません。PDF形式とファイルの存在を確認してください。");
         return false;
     }
+    // image: 描画または取り込みに使用するラスタ画像。
     const QImage image = renderPage(next.get(), 0, error);
     if (image.isNull()) return false;
+    // denominator: 縮尺1:Nの分母N。
     const double denominator = m_drawingSettings->scaleDenominator();
     if (!m_pdfPlacement->setPage(image, next->pagePointSize(0), denominator)) {
         if (error) *error = tr("PDFの実寸サイズが描画可能な範囲を超えています。");
@@ -253,6 +309,7 @@ bool MainWindow::importPdf(const QString &path, QString *error)
     m_pdfPath = path; m_pdfPage = 0; m_importDenominator = denominator;
     m_pdfPageGeometry.clear();
     {
+        // block: 入力値の反映中にシグナルを止め、変更処理の循環を防ぐガード。
         QSignalBlocker block(m_pdfPageInput);
         m_pdfPageInput->setRange(1, m_pdfDocument->pageCount()); m_pdfPageInput->setValue(1);
     }
@@ -263,24 +320,33 @@ bool MainWindow::importPdf(const QString &path, QString *error)
     return true;
 }
 
+/// @brief ファイル選択からPDFを取り込み、失敗時は理由を表示する。
 void MainWindow::choosePdf()
 {
+    // path: 読み込むPDFのファイルパス。空なら選択を取り消す。
     const QString path = QFileDialog::getOpenFileName(this, tr("PDFを取り込む（現在のPDFを置換）"),
         m_pdfPath.isEmpty() ? QString() : QFileInfo(m_pdfPath).absolutePath(), tr("PDF Files (*.pdf)"));
     if (path.isEmpty()) return;
+    // error: 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
     QString error;
     if (!importPdf(path, &error)) QMessageBox::warning(this, tr("PDFを開けません"), error);
 }
 
+/// @brief ページ別の補正配置を保存・復元して表示ページを切り替える。失敗時は現在ページを保つ。
+/// @param page 対象のPDFページ番号。モデルは0始まり、入力欄は1始まり。
+/// @param error 失敗理由を受け渡す文字列。ポインタ引数の場合はnullptrなら書き込まない。
 bool MainWindow::showPdfPage(int page, QString *error)
 {
     if (error) error->clear();
     if (!m_pdfDocument || m_pdfCalibrationDialog || page < 0 || page >= m_pdfDocument->pageCount()) return false;
     if (page == m_pdfPage) return true;
+    // image: 描画または取り込みに使用するラスタ画像。
     const QImage image = renderPage(m_pdfDocument, page, error);
     if (image.isNull()) return false;
+    // saved: 復元するページ配置。未指定なら取り込み時の縮尺から初期配置を計算する。
     std::optional<PdfGeometry> saved;
     if (m_pdfPageGeometry.contains(page)) saved = m_pdfPageGeometry.value(page);
+    // previous: ページ切り替え前のPDF配置。ページ別キャッシュに保存する。
     const PdfGeometry previous = m_pdfPlacement->geometry();
     if (!m_pdfPlacement->setPage(image, m_pdfDocument->pagePointSize(page), m_importDenominator, saved)) {
         if (error) *error = tr("ページの実寸サイズが描画可能な範囲を超えています。");
@@ -293,12 +359,17 @@ bool MainWindow::showPdfPage(int page, QString *error)
     return true;
 }
 
+/// @brief PDFの距離補正画面を開き、測定・適用・取消と操作制限を接続する。
 void MainWindow::editPdfCalibration()
 {
     if (!m_pdfPlacement->hasPage() || m_pdfCalibrationDialog) return;
     m_tabs->setCurrentIndex(0);
+    // dialog: 操作対象のダイアログ。Qtの親子関係またはスタックで寿命を管理する。
     auto *dialog = new PdfCalibrationDialog(this);
     m_pdfCalibrationDialog = dialog;
+    // startPick: 補正画面を隠して指定種類の距離測定を始めるコールバック。
+    // kind: 図形の種類、または現在距離／新しい距離の測定種別。
+    // コールバック: 補正画面を一時的に隠し、作業領域で指定種類の距離測定を始める。
     auto startPick = [this, dialog](DrawingView::DistanceKind kind) {
         dialog->hide();
         m_drawingView->startDistancePick(kind, m_pdfPlacement->boundsMm());
@@ -308,10 +379,14 @@ void MainWindow::editPdfCalibration()
             : tr("新しい距離の始点をクリックしてください。Escで戻ります。"));
     };
     connect(dialog, &PdfCalibrationDialog::measureCurrentRequested, this,
+        // コールバック: 現在距離の測定要求を、PDF内の2点指定へ切り替える。
         [startPick] { startPick(DrawingView::DistanceKind::Current); });
     connect(dialog, &PdfCalibrationDialog::measureTargetRequested, this,
+        // コールバック: 新しい距離の取得要求を、作業領域の2点指定へ切り替える。
         [startPick] { startPick(DrawingView::DistanceKind::Target); });
+    // コールバック: 固定点と距離を検証して補正し、成功した配置をページ別に保存して確定する。
     connect(dialog, &PdfCalibrationDialog::applyRequested, this, [this, dialog] {
+        // fixed: 補正ダイアログから得た固定点。未測定なら空。
         const auto fixed = dialog->fixedPointMm();
         if (!fixed || !m_pdfPlacement->calibrate(dialog->currentDistanceMm(), dialog->targetDistanceMm(), *fixed)) {
             dialog->setApplyError(tr("補正後のPDFが描画可能な範囲を超えます。距離を確認してください。"));
@@ -320,6 +395,7 @@ void MainWindow::editPdfCalibration()
         m_pdfPageGeometry.insert(m_pdfPage, m_pdfPlacement->geometry());
         dialog->accept();
     });
+    // コールバック: 測定状態を解除し、操作制限を戻してダイアログを遅延破棄する。
     connect(dialog, &QDialog::finished, this, [this, dialog] {
         m_drawingView->clearDistancePick(); statusBar()->clearMessage();
         m_pdfCalibrationDialog.clear(); updatePdfActions(); dialog->deleteLater();
@@ -327,9 +403,12 @@ void MainWindow::editPdfCalibration()
     updatePdfActions(); dialog->show();
 }
 
+/// @brief 表示タブと補正中の状態から、PDF・描画・縮尺操作の使用可否を更新する。
 void MainWindow::updatePdfActions()
 {
+    // idle: PDF補正ダイアログが開いておらず、通常操作を許可できる状態。
     const bool idle = !m_pdfCalibrationDialog;
+    // workspace: CAD作業領域タブが現在選択されているかどうか。
     const bool workspace = m_tabs->currentIndex() == 0;
     m_drawingView->setDrawingEnabled(idle && workspace);
     updateDrawingControls();
@@ -343,9 +422,12 @@ void MainWindow::updatePdfActions()
     m_zoomInAction->setEnabled(workspace); m_zoomOutAction->setEnabled(workspace); m_fitPaperAction->setEnabled(workspace);
 }
 
+/// @brief 現在のツールと作成状態に応じて、座標入力・多角形完了ボタンを更新する。
 void MainWindow::updateDrawingControls()
 {
+    // tool: 現在処理するツールの種類。
     const DrawingTool tool = m_drawingView->activeTool();
+    // shapeTool: X/Y数値による点指定を使う描画ツールが選択されているかどうか。
     const bool shapeTool = tool == DrawingTool::Line || tool == DrawingTool::Rectangle
         || tool == DrawingTool::Circle || tool == DrawingTool::Polygon;
     m_pointInputPanel->setVisible(shapeTool);
@@ -354,19 +436,25 @@ void MainWindow::updateDrawingControls()
     m_finishPolygonButton->setEnabled(m_drawingView->canFinishPolygon());
 }
 
+/// @brief 縮尺ダイアログを開き、OKで確定された場合だけ作業領域の設定へ反映する。
 void MainWindow::editScale()
 {
+    // dialog: 操作対象のダイアログ。Qtの親子関係またはスタックで寿命を管理する。
     ScaleDialog dialog(m_drawingSettings, this);
     if (dialog.exec() == QDialog::Accepted) m_drawingSettings->setScaleDenominator(dialog.scaleDenominator());
 }
 
+/// @brief 現在の縮尺と、用紙が覆う実寸mmの範囲を表示する。
 void MainWindow::updateScaleDisplay()
 {
+    // denominator: 縮尺1:Nの分母N。
     const double denominator = m_drawingSettings->scaleDenominator();
     m_scaleLabel->setText(tr("  縮尺 1:%1").arg(denominator, 0, 'g', 15));
+    // realSize: 用紙またはPDFが覆う実寸幅・高さ（mm）。
     const QSizeF realSize = m_drawingSettings->paperSizeMm() * denominator;
     m_paperCoverage->setText(tr("A4 / 実寸範囲 %1 × %2 mm / 原点: 用紙中心")
         .arg(realSize.width(), 0, 'g', 15).arg(realSize.height(), 0, 'g', 15));
 }
 
+/// @brief Designer生成のUI補助オブジェクトを解放する。子QObjectはQtの親子関係で破棄される。
 MainWindow::~MainWindow() { delete ui; }

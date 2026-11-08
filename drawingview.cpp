@@ -1,3 +1,8 @@
+/**
+ * @file drawingview.cpp
+ * @brief CAD座標を表示し、描画・選択・移動・削除・PDF距離測定の入力を処理する。
+ */
+
 #include "drawingview.h"
 #include "drawingsettings.h"
 #include "drawingdocument.h"
@@ -23,52 +28,81 @@
 #include <limits>
 
 namespace {
+/// @brief 座標の各成分が有限で、実寸mmの許容範囲内にあるかを返す。
+/// @param point 用紙中心基準の実寸座標（mm）。
 bool validPoint(QPointF point) { return ShapeData::validPoint(point); }
+/// @brief 全頂点が有効で、同一直線上にない3点以上を含むかを確認する。
+/// @param points 指定順に並ぶ多角形の頂点列（実寸mm）。
 bool validPolygon(const QPolygonF &points) { return ShapeData::validPolygon(points); }
 
+/// @brief 始点を基準に、最も近い許可角度へ終点を射影する。入出力は実寸mm。
+/// @param first 用紙中心基準の実寸座標（mm）。
+/// @param point 用紙中心基準の実寸座標（mm）。
 QPointF constrainedLinePoint(QPointF first, QPointF point)
 {
+    // pi: 度とラジアンの変換に使う円周率。
     constexpr double pi = 3.14159265358979323846;
+    // delta: 開始位置から加える移動量（実寸mm）。
     const QPointF delta = point - first;
     if (delta.isNull()) return point;
+    // angle: 線分または候補方向の角度（ラジアン、テスト入力では度）。
     const double angle = std::atan2(delta.y(), delta.x());
+    // angles: Shiftで許可する全象限の角度一覧（度）。
     const std::array<int, 16> angles = {0, 30, 45, 60, 90, 120, 135, 150,
                                       180, 210, 225, 240, 270, 300, 315, 330};
+    // nearest: 現在までに見つかった最も近い許可角度（ラジアン）。
+    // difference: 候補角度との最小の差（ラジアン）。
     double nearest = 0, difference = std::numeric_limits<double>::max();
+    // degrees: 許可方向を走査するときの角度（度）。
     for (const int degrees : angles) {
+        // candidate: 比較対象の許可角度またはツールボタン。
         const double candidate = degrees * pi / 180;
+        // distance: 候補方向との角度差の絶対値（ラジアン）。
         const double distance = std::abs(std::remainder(angle - candidate, 2 * pi));
         if (distance < difference) { nearest = candidate; difference = distance; }
     }
+    // direction: 選んだ許可角度の単位方向ベクトル。
     const QPointF direction(std::cos(nearest), std::sin(nearest));
+    // projected: 線分を許可方向へ射影した長さ（実寸mm）。
     const double projected = delta.x() * direction.x() + delta.y() * direction.y();
     return first + direction * projected;
 }
 
+/// @brief 画面上の線幅がズームで変化しない、確定図形用のペンを返す。
 QPen shapePen()
 {
+    // pen: 画面上の線や選択マーカーに使う描画ペン。
     QPen pen(QColor("#182b3d"), 1.5); pen.setCosmetic(true); return pen;
 }
 
+/// @brief 確定した面図形に使う半透明の塗りを返す。
 QBrush shapeBrush() { return QColor(95, 155, 215, 65); }
 }
 
+/// @brief 図形モデル・シーン・用紙を作り、座標表示と入力処理を接続する。
+/// @param settings 作業領域の縮尺・用紙設定。参照先は呼び出し側が管理する。
+/// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
 DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     : QGraphicsView(parent), m_settings(settings)
 {
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
     m_document = new DrawingDocument(this); m_document->setObjectName("drawingDocument");
+    // コールバック: モデル変更の前に移動プレビューを取り消し、変更前の表示へ戻す。
     connect(m_document, &DrawingDocument::aboutToChange, this, [this] { endShapeMove(false); });
     connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeChanged, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeRemoved, this, &DrawingView::removeShapeItem);
     m_selectionMenu = new QMenu(this); m_selectionMenu->setObjectName("shapeSelectionMenu");
+    // remove: 右クリックメニューの削除アクション。親メニューが所有する。
     auto *remove = m_selectionMenu->addAction(tr("削除")); remove->setObjectName("deleteSelectedShapesAction");
+    // コールバック: 削除メニューの選択を、編集可否を検証する共通削除処理へ渡す。
     connect(remove, &QAction::triggered, this, [this] { deleteSelectedShapes(); });
     setBackgroundBrush(QColor("#51565e"));
     setRenderHint(QPainter::Antialiasing);
     setMouseTracking(true);
+    // rememberScroll: スクロール変更からカメラ中心を記録するコールバック。
+    // コールバック: ユーザーがスクロールしたときだけ、現在の論理カメラ中心を記録する。
     auto rememberScroll = [this] {
         if (!m_updatingView) m_viewCenter = mapToScene(viewport()->rect().center());
     };
@@ -76,10 +110,12 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, rememberScroll);
     setToolTip(tr("CAD座標は実寸mmです。原点は用紙中心、Xは右向き、Yは上向きです。"));
 
+    // border: 用紙の輪郭を描く、画面上の幅を保つペン。
     QPen border(QColor("#252a30"));
     border.setCosmetic(true);
     m_paper = scene()->addRect({}, border, Qt::white);
     m_paper->setZValue(-1000);
+    // printable: 印刷可能範囲を描く破線のペン。
     QPen printable(QColor("#888888"), 1, Qt::DashLine);
     printable.setCosmetic(true);
     m_printableArea = scene()->addRect({}, printable, Qt::NoBrush);
@@ -89,21 +125,27 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     updatePaper();
 }
 
+/// @brief 有効なズーム倍率を設定する。実寸座標を保ち、不正倍率ではfalseを返す。
+/// @param zoom 用紙基準の表示に対する画面ズーム倍率。
 bool DrawingView::setDisplayZoom(double zoom)
 {
     if (!std::isfinite(zoom) || zoom < 0.1 || zoom > 10.0) return false;
+    // center: 用紙中心基準の実寸座標（mm）。
     const QPointF center = m_viewCenter;
     m_displayZoom = zoom;
     updateViewTransform(center);
     return true;
 }
 
+/// @brief 用紙中心と基準ズームへ戻す。図形やPDFの実寸は変更しない。
 void DrawingView::resetView()
 {
     m_displayZoom = 1;
     updateViewTransform({});
 }
 
+/// @brief 対応済みのツールへ切り替える。測定中は拒否し、未確定操作は取り消す。
+/// @param tool 現在処理するツールの種類。
 bool DrawingView::setActiveTool(DrawingTool tool)
 {
     if (m_picking || (tool != DrawingTool::Selection && tool != DrawingTool::Pan
@@ -121,12 +163,14 @@ bool DrawingView::setActiveTool(DrawingTool tool)
     return true;
 }
 
+/// @brief 現在のツールが直線・四角・円・多角形の描画ツールかを返す。
 bool DrawingView::isDrawingTool() const
 {
     return m_activeTool == DrawingTool::Line || m_activeTool == DrawingTool::Rectangle
         || m_activeTool == DrawingTool::Circle || m_activeTool == DrawingTool::Polygon;
 }
 
+/// @brief 現在のツールと作成途中の状態に対応する操作案内を返す。
 QString DrawingView::drawingHint() const
 {
     if (!m_drawingEnabled) return tr("作業領域で描画ツールを選択してください。");
@@ -143,6 +187,7 @@ QString DrawingView::drawingHint() const
     return tr("終点を指定してください。Shiftで角度を固定、Escで中止します。");
 }
 
+/// @brief プレビューを再描画し、描画状態と操作案内の変更を通知する。
 void DrawingView::notifyDrawingState()
 {
     viewport()->update();
@@ -150,12 +195,15 @@ void DrawingView::notifyDrawingState()
     emit drawingHintChanged(drawingHint());
 }
 
+/// @brief 作成途中の頂点とプレビューを破棄する。確定済み図形は残す。
 void DrawingView::cancelDrawing()
 {
     m_draftPoints.clear(); m_draftHover.reset(); m_drawPressed = false; m_drawShift = false;
     notifyDrawingState();
 }
 
+/// @brief 作業領域の編集可否を切り替え、無効化時は未確定の操作を取り消す。
+/// @param enabled 描画・選択編集を許可するかどうか。
 void DrawingView::setDrawingEnabled(bool enabled)
 {
     if (m_drawingEnabled == enabled) return;
@@ -164,11 +212,17 @@ void DrawingView::setDrawingEnabled(bool enabled)
     else notifyDrawingState();
 }
 
+/// @brief 2点が画面上の6px以内にあるかを判定する。ズームで判定幅を変えない。
+/// @param point 用紙中心基準の実寸座標（mm）。
+/// @param vertex 用紙中心基準の実寸座標（mm）。
 bool DrawingView::nearDraftVertex(QPointF point, QPointF vertex) const
 {
     return QLineF(viewportTransform().map(point), viewportTransform().map(vertex)).length() <= 6;
 }
 
+/// @brief 実寸mmの指定点を作成途中へ追加し、必要な点数で図形を確定する。不正点は拒否する。
+/// @param point 用紙中心基準の実寸座標（mm）。
+/// @param constrainLine 直線の終点にShift相当の角度制限を適用するかどうか。
 bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
 {
     if (!m_drawingEnabled || m_picking || m_panning || !isDrawingTool()) return false;
@@ -194,9 +248,13 @@ bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
     return commitShape(point);
 }
 
+/// @brief 2点から直線・四角・円を作り、共通モデルへの追加が成功した場合だけ確定する。
+/// @param second 用紙中心基準の実寸座標（mm）。
 bool DrawingView::commitShape(QPointF second)
 {
+    // first: 用紙中心基準の実寸座標（mm）。
     const QPointF first = m_draftPoints.first();
+    // geometry: 2点から生成した確定候補の形状データ（実寸mm）。
     ShapeGeometry geometry;
     if (m_activeTool == DrawingTool::Line) geometry = QLineF(first, second);
     else if (m_activeTool == DrawingTool::Rectangle) geometry = QRectF(first, second).normalized();
@@ -206,16 +264,19 @@ bool DrawingView::commitShape(QPointF second)
         emit drawingHintChanged(tr("大きさが0の図形や、範囲外の図形は作成できません。終点を指定し直してください。"));
         return false;
     }
+    // created: 今回確定した図形を作成したツールの種類。
     const DrawingTool created = m_activeTool;
     cancelDrawing(); emit shapeCreated(created);
     return true;
 }
 
+/// @brief 現在の多角形を、測定やパンと競合せず有効な面として閉じられるかを返す。
 bool DrawingView::canFinishPolygon() const
 {
     return m_drawingEnabled && !m_picking && !m_panning && m_activeTool == DrawingTool::Polygon && validPolygon(m_draftPoints);
 }
 
+/// @brief 頂点順を保った多角形をモデルへ追加する。不成立なら作成途中の頂点を残す。
 bool DrawingView::finishPolygon()
 {
     if (!canFinishPolygon()) {
@@ -227,18 +288,26 @@ bool DrawingView::finishPolygon()
     return true;
 }
 
+/// @brief このビューが管理する表示アイテムの図形UUIDを返す。管理外なら空のUUID。
+/// @param item シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
 QUuid DrawingView::shapeId(const QGraphicsItem *item) const
 {
     if (!m_shapes.contains(const_cast<QGraphicsItem*>(item))) return {};
     return item->data(ShapeIdRole).toUuid();
 }
 
+/// @brief モデルの形状・配置を表示へ反映する。新規図形の場合は描画アイテムも作る。
+/// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
 void DrawingView::syncShape(const QUuid &id)
 {
+    // data: 検証・追加・表示同期に使う図形データ。
     const auto data = m_document->shape(id);
     if (!data) return;
+    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     auto *item = m_shapeGraphics.value(id, nullptr);
+    // added: モデルから初めて表示アイテムを作る必要があるかどうか。
     const bool added = !item;
+    // tool: 現在処理するツールの種類。
     DrawingTool tool = DrawingTool::Line;
     switch (data->kind()) {
     case ShapeKind::Line:
@@ -252,7 +321,9 @@ void DrawingView::syncShape(const QUuid &id)
         break;
     case ShapeKind::Circle: {
         tool = DrawingTool::Circle;
+        // circle: 対象の円形状またはその描画アイテム。
         const auto circle = std::get<CircleGeometry>(data->geometryMm);
+        // radius: 円の外接矩形の対角へ向かう半径ベクトル（実寸mm）。
         const QPointF radius(circle.radiusMm, circle.radiusMm);
         if (!item) item = scene()->addEllipse({}, shapePen(), shapeBrush());
         qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setRect(QRectF(circle.centerMm - radius, circle.centerMm + radius));
@@ -273,81 +344,113 @@ void DrawingView::syncShape(const QUuid &id)
     updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
 }
 
+/// @brief 削除通知の図形IDに対応する表示アイテムを破棄し、選択表示と範囲を更新する。
+/// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
 void DrawingView::removeShapeItem(const QUuid &id)
 {
+    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     auto *item = m_shapeGraphics.take(id);
     if (!item) return;
     m_shapes.removeOne(item); delete item;
     updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
 }
 
+/// @brief 現在選択されている、管理対象の表示アイテムを描画順で返す。
 QList<QGraphicsItem*> DrawingView::selectedShapeItems() const
 {
+    // result: 描画順に集める選択済みアイテムの参照リスト。所有権はシーンに残る。
     QList<QGraphicsItem*> result;
+    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     for (auto *item : m_shapes) if (item->isSelected()) result.append(item);
     return result;
 }
 
+/// @brief 選択表示の再描画と選択状態・操作案内の変更を通知する。
 void DrawingView::notifySelection()
 {
     viewport()->update(); emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
 }
 
+/// @brief 未確定の移動を取り消し、全図形の選択を解除する。
 void DrawingView::clearShapeSelection()
 {
     endShapeMove(false);
+    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     for (auto *item : m_shapes) item->setSelected(false);
     notifySelection();
 }
 
+/// @brief 画面座標から手前の図形を探す。細線も6pxの許容幅で判定する。
+/// @param pixel 入力・表示位置を比較する画面座標（px）。
 QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
 {
     // Hit tolerance is in screen pixels so thin lines remain usable at any scale.
+    // stroker: 細い輪郭の周囲へ画面px単位の選択許容幅を与える生成器。
     QPainterPathStroker stroker; stroker.setWidth(12);
+    // it: 手前から図形を調べる逆順イテレータ。
     for (auto it = m_shapes.crbegin(); it != m_shapes.crend(); ++it) {
+        // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
         auto *item = *it;
         if (!item->isVisible()) continue;
+        // data: 検証・追加・表示同期に使う図形データ。
         const auto data = m_document->shape(shapeId(item));
         if (!data) continue;
+        // path: 実寸形状を画面座標へ変換した選択判定用パス（px）。
         const QPainterPath path = viewportTransform().map(item->mapToScene(data->localPath()));
+        // filled: 選択判定で線の近傍だけでなく面の内部も対象にするかどうか。
         const bool filled = data->kind() != ShapeKind::Line;
         if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
     }
     return nullptr;
 }
 
+/// @brief ドラッグの一時状態を終了する。確定時だけモデルを更新し、取消時は元の表示へ戻す。
+/// @param commit 一時的な移動をモデルへ確定するか、元の位置へ戻すか。
 void DrawingView::endShapeMove(bool commit)
 {
+    // origins: 確定・取消に使う移動前の表示状態のコピー。
     const auto origins = m_moveOrigins;
+    // delta: 開始位置から加える移動量（実寸mm）。
     const QPointF delta = m_moveDelta;
+    // wasMoving: 処理開始時に移動プレビューを表示していたかどうか。
     const bool wasMoving = m_movingShapes;
     // Clear interaction state before document signals can call back into the view.
     m_moveOrigins.clear(); m_moveDelta = {}; m_selectionPressed = false; m_movingShapes = false;
+    // committed: ドラッグの移動量をモデルへ正常に確定できたかどうか。
     bool committed = false;
     if (commit && wasMoving) {
+        // ids: 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
         QList<QUuid> ids;
+        // origin: 移動前の表示アイテムと配置移動量の組。
         for (const auto &origin : origins) ids.append(shapeId(origin.first));
         committed = m_document->translateShapes(ids, delta);
     }
+    // origin: 移動前の表示アイテムと配置移動量の組。
     if (!committed) for (const auto &origin : origins) origin.first->setPos(origin.second);
     if (wasMoving) { updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update(); }
 }
 
+/// @brief 選択ツールが有効な場合に選択図形をモデルから削除する。対象なしや操作禁止時はfalse。
 bool DrawingView::deleteSelectedShapes()
 {
     if (!m_drawingEnabled || m_picking || m_panning || m_activeTool != DrawingTool::Selection) return false;
     endShapeMove(false);
+    // ids: 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
     QList<QUuid> ids;
+    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     for (auto *item : selectedShapeItems()) ids.append(shapeId(item));
     return m_document->removeShapes(ids);
 }
 
+/// @brief 選択ツールで右クリックした図形を選び、削除メニューを表示する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::contextMenuEvent(QContextMenuEvent *event)
 {
     if (!m_drawingEnabled || m_picking || m_panning || m_activeTool != DrawingTool::Selection) {
         event->accept(); return;
     }
     endShapeMove(false);
+    // hit: クリック位置で見つかった最前面の図形アイテム。
     auto *hit = shapeAt(event->pos());
     if (hit && !hit->isSelected()) {
         clearShapeSelection(); hit->setSelected(true); notifySelection();
@@ -356,6 +459,7 @@ void DrawingView::contextMenuEvent(QContextMenuEvent *event)
     m_selectionMenu->popup(event->globalPos()); event->accept();
 }
 
+/// @brief パン・測定・描画などの現在状態に合うカーソルを設定する。
 void DrawingView::updateInteractionCursor()
 {
     if (m_panning) viewport()->setCursor(Qt::ClosedHandCursor);
@@ -365,6 +469,7 @@ void DrawingView::updateInteractionCursor()
     else viewport()->setCursor(Qt::CrossCursor);
 }
 
+/// @brief 縮尺に応じて用紙範囲と表示変換を更新する。確定図形の実寸は維持する。
 void DrawingView::updatePaper()
 {
     endShapeMove(false);
@@ -376,6 +481,8 @@ void DrawingView::updatePaper()
     emit cursorLeft();
 }
 
+/// @brief PDFの実寸配置範囲を更新し、用紙・図形と合わせて移動可能な範囲を整える。
+/// @param bounds 検証・描画・測定対象の外接矩形（特記がなければ実寸mm）。
 void DrawingView::setContentBounds(QRectF bounds)
 {
     m_contentBounds = bounds;
@@ -383,30 +490,43 @@ void DrawingView::setContentBounds(QRectF bounds)
     setViewCenter(m_viewCenter);
 }
 
+/// @brief 用紙・PDF・確定図形を含むシーン範囲を更新する。カメラ位置の記録更新は抑制する。
 void DrawingView::updateSceneBounds()
 {
+    // updating: スクロール等の再入でカメラ中心が変わらないようにする表示更新ガード。
     QScopedValueRollback<bool> updating(m_updatingView, true);
+    // margin: シーン範囲の周囲へ加える余白（実寸mm）。
     const double margin = 10 * m_settings->scaleDenominator();
+    // paperBounds: 余白込みの用紙範囲（実寸mm）。
     const QRectF paperBounds = m_paper->rect().adjusted(-margin, -margin, margin, margin);
+    // bounds: 検証・描画・測定対象の外接矩形（特記がなければ実寸mm）。
     QRectF bounds = m_contentBounds.isEmpty() ? paperBounds : paperBounds.united(m_contentBounds);
+    // shape: 描画順に処理する確定済み図形データ。
     for (const auto &shape : m_document->shapes())
         bounds = bounds.united(shape.boundsMm().adjusted(-1, -1, 1, 1));
     scene()->setSceneRect(bounds);
 }
 
+/// @brief 指定中心を保ち、用紙換算と画面ズームを合わせた表示変換を適用する。
+/// @param center 用紙中心基準の実寸座標（mm）。
 void DrawingView::updateViewTransform(QPointF center)
 {
     if (m_updatingView) return;
+    // updating: スクロール等の再入でカメラ中心が変わらないようにする表示更新ガード。
     QScopedValueRollback<bool> updating(m_updatingView, true);
+    // paper: 用紙の物理寸法（mm）。
     const QSizeF paper = m_settings->paperSizeMm();
     // Scroll bars can appear during zoom. Their appearance must not redefine
     // the base fit scale, otherwise zoom and resize recursively change it.
+    // available: スクロールバー表示に依存しない、利用可能な最大画面寸法（px）。
     const QSize available = maximumViewportSize();
     // The minimum also keeps Qt's inverse transform numerically usable at the
     // largest supported denominator and smallest display zoom.
+    // pixelsPerPaperMm: 物理的な用紙1mmを画面上の何pxで表示するか。
     const double pixelsPerPaperMm = std::max(0.2, std::min(
         available.width() / (paper.width() + 20),
         available.height() / (paper.height() + 20)));
+    // pixelsPerModelMm: 実寸1mmを画面上の何pxで表示するか。
     const double pixelsPerModelMm = pixelsPerPaperMm * m_displayZoom
         / m_settings->scaleDenominator();
     // Invert only the view's Y axis. Geometry in the scene remains in real mm.
@@ -414,14 +534,19 @@ void DrawingView::updateViewTransform(QPointF center)
     setViewCenter(center);
 }
 
+/// @brief カメラ中心を実寸mmで設定し、パン操作用の表示範囲を確保する。
+/// @param center 用紙中心基準の実寸座標（mm）。
 void DrawingView::setViewCenter(QPointF center)
 {
+    // updating: スクロール等の再入でカメラ中心が変わらないようにする表示更新ガード。
     QScopedValueRollback<bool> updating(m_updatingView, true);
     m_viewCenter = center;
+    // visible: 現在の画面が覆う実寸幅・高さ（mm）。
     const QSizeF visible(std::max(1, viewport()->width()) / std::abs(transform().m11()),
                          std::max(1, viewport()->height()) / std::abs(transform().m22()));
     // Navigation margins are view-only. Panning and cursor-centered zoom must
     // also work in the gray area, without changing model items or paper bounds.
+    // navigation: 現在位置の周囲へパンの余地を確保する実寸mmの範囲。
     const QRectF navigation(center.x() - visible.width() * 1.5,
                             center.y() - visible.height() * 1.5,
                             visible.width() * 3, visible.height() * 3);
@@ -429,18 +554,25 @@ void DrawingView::setViewCenter(QPointF center)
     centerOn(center);
 }
 
+/// @brief カーソル位置を基準にズームする。移動途中の図形は確定せず取り消す。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::wheelEvent(QWheelEvent *event)
 {
     endShapeMove(false);
+    // delta: ホイールの縦方向入力。angleDeltaは1/8度、代替のpixelDeltaはpx。
     const double delta = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->pixelDelta().y();
     if (delta == 0) { event->ignore(); return; }
+    // position: 入力・表示位置を比較する画面座標（px）。
     const QPoint position = event->position().toPoint();
+    // fixedPoint: 用紙中心基準の実寸座標（mm）。
     const QPointF fixedPoint = mapToScene(position);
+    // zoom: 用紙基準の表示に対する画面ズーム倍率。
     const double zoom = std::clamp(m_displayZoom * std::pow(1.25, delta / 120.0), 0.1, 10.0);
     setDisplayZoom(zoom);
     setViewCenter(m_viewCenter + fixedPoint - mapToScene(position));
     // Qt scroll bars use integer device positions. Correct the final device
     // offset directly rather than accumulating rounded scene-center errors.
+    // error: ズーム後に固定点の画面位置へ生じた丸めずれ（px）。
     const QPointF error = viewportTransform().map(fixedPoint) - event->position();
     horizontalScrollBar()->setValue(horizontalScrollBar()->value() + qRound(error.x()));
     verticalScrollBar()->setValue(verticalScrollBar()->value() + qRound(error.y()));
@@ -448,15 +580,19 @@ void DrawingView::wheelEvent(QWheelEvent *event)
     event->accept();
 }
 
+/// @brief カーソル座標を通知し、パン・移動・測定・作成途中のプレビューを更新する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::mouseMoveEvent(QMouseEvent *event)
 {
     if (m_panning) {
+        // delta: 直前の押下・移動位置からの画面移動量（px）。
         const QPoint delta = event->pos() - m_lastPanPosition;
         setViewCenter(mapToScene(viewport()->rect().center() - delta));
         m_lastPanPosition = event->pos();
         emit cursorPositionChanged(mapToScene(event->pos()));
         event->accept(); return;
     }
+    // point: 用紙中心基準の実寸座標（mm）。
     const QPointF point = mapToScene(event->pos());
     emit cursorPositionChanged(point);
     if (m_selectionPressed) {
@@ -464,11 +600,15 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
             event->accept(); return;
         }
         m_movingShapes = true;
+        // delta: 開始位置から加える移動量（実寸mm）。
         const QPointF delta = point - m_selectionPressMm;
+        // ids: 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
         QList<QUuid> ids;
+        // origin: 移動前の表示アイテムと配置移動量の組。
         for (const auto &origin : m_moveOrigins) ids.append(shapeId(origin.first));
         if (m_document->canTranslateShapes(ids, delta)) {
             m_moveDelta = delta;
+            // origin: 移動前の表示アイテムと配置移動量の組。
             for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second + delta);
         }
         else emit drawingHintChanged(tr("移動後の座標は±10000000mm以内にしてください。"));
@@ -491,6 +631,9 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
     QGraphicsView::mouseMoveEvent(event);
 }
 
+/// @brief 描画や移動を取り消して、PDF補正用の2点測定を開始する。
+/// @param kind 図形の種類、または現在距離／新しい距離の測定種別。
+/// @param pdfBounds PDFの配置領域（実寸mm）。現在距離の測定点を制限する。
 void DrawingView::startDistancePick(DistanceKind kind, QRectF pdfBounds)
 {
     endShapeMove(false); m_selectionMenu->hide();
@@ -503,6 +646,7 @@ void DrawingView::startDistancePick(DistanceKind kind, QRectF pdfBounds)
     setFocus();
 }
 
+/// @brief 距離測定の点・プレビュー・操作状態を解除する。
 void DrawingView::clearDistancePick()
 {
     m_picking = false;
@@ -512,6 +656,8 @@ void DrawingView::clearDistancePick()
     viewport()->update();
 }
 
+/// @brief パン・測定・選択・描画の優先順でマウス押下を受け付ける。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::MiddleButton
@@ -527,7 +673,9 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
     }
     if (m_drawingEnabled && m_activeTool == DrawingTool::Selection && event->button() == Qt::LeftButton) {
         endShapeMove(false); setFocus();
+        // hit: クリック位置で見つかった最前面の図形アイテム。
         auto *hit = shapeAt(event->pos());
+        // shift: 押下時にShiftが指定されているかどうか。
         const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
         if (!hit) { if (!shift) clearShapeSelection(); }
         else if (shift) hit->setSelected(!hit->isSelected());
@@ -535,6 +683,7 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
             if (!hit->isSelected()) { clearShapeSelection(); hit->setSelected(true); }
             m_selectionPressed = true; m_selectionPressPixel = event->pos();
             m_selectionPressMm = mapToScene(event->pos());
+            // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
             for (auto *item : selectedShapeItems()) m_moveOrigins.append({item, item->pos()});
         }
         notifySelection(); event->accept(); return;
@@ -547,6 +696,8 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
     event->accept();
 }
 
+/// @brief パン終了、移動確定、点指定、距離測定を現在の状態に従って処理する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::mouseReleaseEvent(QMouseEvent *event)
 {
     if (m_panning) {
@@ -561,9 +712,11 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
             m_ignoreDrawingRelease = false; m_drawPressed = false; event->accept(); return;
         }
         if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
+            // pressed: 対応する描画用押下が先に受け付けられていたかどうか。
             const bool pressed = m_drawPressed; m_drawPressed = false;
             event->accept();
             if (!pressed || m_dragged) return;
+            // point: 用紙中心基準の実寸座標（mm）。
             const QPointF point = mapToScene(event->pos());
             if (m_activeTool == DrawingTool::Polygon && !m_draftPoints.isEmpty()
                 && (nearDraftVertex(point, m_draftPoints.last()) || nearDraftVertex(point, m_draftPoints.first()))) {
@@ -577,6 +730,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
     }
     event->accept();
     if (event->button() != Qt::LeftButton || m_dragged) return;
+    // point: 用紙中心基準の実寸座標（mm）。
     const QPointF point = mapToScene(event->pos());
     if (m_pickKind == DistanceKind::Current && !m_pdfBounds.contains(point)) {
         emit pickHintChanged(tr("現在の距離はPDFの内側の2点を指定してください。Escで戻ります。"));
@@ -586,6 +740,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
         m_first = point;
         emit pickHintChanged(tr("終点をクリックしてください。Escで測定を中止します。"));
     } else {
+        // distance: 指定した2点間の実寸距離（mm）。
         const double distance = QLineF(*m_first, point).length();
         if (!std::isfinite(distance) || distance <= 0) {
             emit pickHintChanged(tr("始点とは異なる点を指定してください。"));
@@ -599,12 +754,15 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
     viewport()->update();
 }
 
+/// @brief 多角形の始点または終点でのダブルクリックを完了操作として処理する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (!m_picking && m_activeTool == DrawingTool::Selection) { event->accept(); return; }
     if (!m_picking && m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_drawPressed = false; m_ignoreDrawingRelease = true;
         if (m_activeTool == DrawingTool::Polygon && !m_draftPoints.isEmpty()) {
+            // point: 用紙中心基準の実寸座標（mm）。
             const QPointF point = mapToScene(event->pos());
             if (nearDraftVertex(point, m_draftPoints.first()) || nearDraftVertex(point, m_draftPoints.last()))
                 finishPolygon();
@@ -614,6 +772,8 @@ void DrawingView::mouseDoubleClickEvent(QMouseEvent *event)
     QGraphicsView::mouseDoubleClickEvent(event);
 }
 
+/// @brief Escによる取消、Delによる削除・頂点戻し、Shiftによる角度制限を処理する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::keyPressEvent(QKeyEvent *event)
 {
     if (m_picking && event->key() == Qt::Key_Escape) {
@@ -641,12 +801,16 @@ void DrawingView::keyPressEvent(QKeyEvent *event)
     QGraphicsView::keyPressEvent(event);
 }
 
+/// @brief Shiftを離した際の角度制限プレビューを解除する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::keyReleaseEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Shift) { m_drawShift = false; viewport()->update(); }
     QGraphicsView::keyReleaseEvent(event);
 }
 
+/// @brief カーソルがビューを離れたことを通知し、ホバーのプレビューを消す。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::leaveEvent(QEvent *event)
 {
     emit cursorLeft();
@@ -656,22 +820,30 @@ void DrawingView::leaveEvent(QEvent *event)
     QGraphicsView::leaveEvent(event);
 }
 
+/// @brief 画面サイズ変更に合わせて、論理的なカメラ中心を保った表示変換へ更新する。
+/// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::resizeEvent(QResizeEvent *event)
 {
+    // alreadyUpdating: リサイズの開始時点ですでに表示変換を更新していたかどうか。
     const bool alreadyUpdating = m_updatingView;
     {
+        // updating: スクロール等の再入でカメラ中心が変わらないようにする表示更新ガード。
         QScopedValueRollback<bool> updating(m_updatingView, true);
         QGraphicsView::resizeEvent(event);
     }
     if (!alreadyUpdating) updateViewTransform(m_viewCenter);
 }
 
+/// @brief 原点、距離測定の点と線、作成途中の図形を最前面へ描画する。
+/// @param painter 呼び出し元から受け取る描画先。保存・復元で描画状態を保つ。
 void DrawingView::drawForeground(QPainter *painter, const QRectF &)
 {
     painter->save();
+    // pen: 画面上の線や選択マーカーに使う描画ペン。
     QPen pen(QColor("#b52c39"), 1);
     pen.setCosmetic(true);
     painter->setPen(pen);
+    // radius: 原点マーカーを画面上の6pxに保つための実寸mm半径。
     const double radius = 6.0 / std::abs(transform().m11());
     painter->drawLine(QPointF(-radius, 0), QPointF(radius, 0));
     painter->drawLine(QPointF(0, -radius), QPointF(0, radius));
@@ -680,6 +852,7 @@ void DrawingView::drawForeground(QPainter *painter, const QRectF &)
         pen.setColor(m_pickKind == DistanceKind::Current ? QColor("#d52d41") : QColor("#11804b"));
         painter->setPen(pen);
         painter->setBrush(pen.color());
+        // marker: マーカーを一定の画面サイズに保つための実寸mm半径。
         const double marker = 4.0 / std::abs(transform().m11());
         painter->drawEllipse(*m_first, marker, marker);
         if (m_second) {
@@ -691,25 +864,31 @@ void DrawingView::drawForeground(QPainter *painter, const QRectF &)
         }
     }
     if (m_drawingEnabled && !m_draftPoints.isEmpty()) {
+        // draftPen: 作成途中の図形を破線で表示するペン。
         QPen draftPen(QColor("#1768b3"), 1.5, Qt::DashLine); draftPen.setCosmetic(true);
         painter->setPen(draftPen); painter->setBrush(shapeBrush());
+        // first: 用紙中心基準の実寸座標（mm）。
         const QPointF first = m_draftPoints.first();
         if (m_activeTool == DrawingTool::Polygon) {
             painter->setBrush(Qt::NoBrush);
             painter->drawPolyline(m_draftPoints);
             if (m_draftHover) painter->drawLine(m_draftPoints.last(), *m_draftHover);
         } else if (m_draftHover) {
+            // second: 用紙中心基準の実寸座標（mm）。
             const QPointF second = m_activeTool == DrawingTool::Line && m_drawShift
                 ? constrainedLinePoint(first, *m_draftHover) : *m_draftHover;
             if (m_activeTool == DrawingTool::Line) painter->drawLine(first, second);
             else if (m_activeTool == DrawingTool::Rectangle) painter->drawRect(QRectF(first, second).normalized());
             else if (m_activeTool == DrawingTool::Circle) {
+                // radius: 中心とカーソルの間から求める円の半径（実寸mm）。
                 const double radius = QLineF(first, second).length();
                 painter->drawEllipse(first, radius, radius);
             }
         }
         painter->setBrush(QColor("#1768b3"));
+        // marker: マーカーを一定の画面サイズに保つための実寸mm半径。
         const double marker = 3.0 / std::abs(transform().m11());
+        // point: 用紙中心基準の実寸座標（mm）。
         for (const QPointF point : m_draftPoints) painter->drawEllipse(point, marker, marker);
     }
     painter->restore();
