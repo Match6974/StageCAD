@@ -6,6 +6,7 @@
 #include "drawingview.h"
 #include "drawingsettings.h"
 #include "drawingdocument.h"
+#include "shapeselectionmodel.h"
 
 #include <QGraphicsRectItem>
 #include <QGraphicsLineItem>
@@ -13,6 +14,7 @@
 #include <QGraphicsPolygonItem>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QStyleOptionGraphicsItem>
 #include <QPainterPathStroker>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -28,6 +30,40 @@
 #include <limits>
 
 namespace {
+/// @brief 標準アイテムの型と面描画を維持し、開いた形状だけを閉じずに描画する。シーンが所有する。
+/// @tparam Base 円または多角形の標準描画アイテム。
+template<class Base> class OpenShapeItem : public Base {
+public:
+    /// @brief 開閉状態とローカル実寸パスを同期する。
+    /// @param path 描画する開いたパス（実寸mm）。
+    /// @param open 面を塗らず、終点と始点を結ばないかどうか。
+    void setOpenPath(const QPainterPath &path, bool open) { m_path = path; m_open = open; this->update(); }
+    /// @brief 開いた形状のヒット領域には線幅だけを与える。
+    QPainterPath shape() const override {
+        if (!m_open) return Base::shape();
+        // stroker: 開いた線だけをヒット対象にする生成器。
+        QPainterPathStroker stroker; stroker.setWidth(this->pen().widthF()); return stroker.createStroke(m_path);
+    }
+    /// @brief 真円・閉多角形では標準描画、円弧・開多角形では線だけを描画する。
+    /// @param painter Qtが所有する描画コンテキスト。
+    /// @param option 選択状態などの描画情報。
+    /// @param widget 描画先。所有権は取得しない。
+    void paint(QPainter *painter,const QStyleOptionGraphicsItem *option,QWidget *widget) override {
+        if (!m_open) { Base::paint(painter,option,widget); return; }
+        painter->save(); painter->setPen(this->pen()); painter->setBrush(Qt::NoBrush); painter->drawPath(m_path);
+        if (option->state & QStyle::State_Selected) {
+            // selectionPen: ズームに依存しない選択枠用の画面線幅。
+            QPen selectionPen(Qt::black,0,Qt::DashLine); painter->setPen(selectionPen); painter->drawRect(this->boundingRect());
+        }
+        painter->restore();
+    }
+private:
+    // m_path: 終点と始点を結ばずに描画するローカル実寸形状。
+    QPainterPath m_path;
+    // m_open: 標準の塗りつぶし描画を使わない場合だけtrue。
+    bool m_open = false;
+};
+
 /// @brief 座標の各成分が有限で、実寸mmの許容範囲内にあるかを返す。
 /// @param point 用紙中心基準の実寸座標（mm）。
 bool validPoint(QPointF point) { return ShapeData::validPoint(point); }
@@ -79,6 +115,19 @@ QPen shapePen()
 QBrush shapeBrush() { return QColor(95, 155, 215, 65); }
 }
 
+/// @brief 図面の拡大率に関係なく、選択頂点を小さな丸で示す。
+/// @param point マーカーの実寸座標（mm）。
+/// @param visible マーカーの表示状態。
+void DrawingView::highlightVertex(QPointF point,bool visible)
+{
+    if (!m_vertexMarker) {
+        m_vertexMarker = scene()->addEllipse(-4,-4,8,8,QPen(QColor("#c35100"),1),QBrush(QColor("#ffdf60")));
+        m_vertexMarker->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        m_vertexMarker->setAcceptedMouseButtons(Qt::NoButton); m_vertexMarker->setZValue(m_shapes.size()+1);
+    }
+    m_vertexMarker->setPos(point); m_vertexMarker->setVisible(visible); viewport()->update();
+}
+
 /// @brief 図形モデル・シーン・用紙を作り、座標表示と入力処理を接続する。
 /// @param settings 作業領域の縮尺・用紙設定。参照先は呼び出し側が管理する。
 /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
@@ -88,8 +137,20 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
     m_document = new DrawingDocument(this); m_document->setObjectName("drawingDocument");
+    m_selectionModel = new ShapeSelectionModel(m_document, this);
+    m_selectionModel->setObjectName("shapeSelectionModel");
+    // コールバック: 外部からの選択変更でも未確定移動を取り消し、表示と通知を更新する。
+    connect(m_selectionModel, &ShapeSelectionModel::selectionChanged, this, [this] {
+        endShapeMove(false); syncSelectionDisplay();
+        emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
+    });
+    connect(scene(), &QGraphicsScene::selectionChanged, this, &DrawingView::syncSelectionDisplay);
     // コールバック: モデル変更の前に移動プレビューを取り消し、変更前の表示へ戻す。
     connect(m_document, &DrawingDocument::aboutToChange, this, [this] { endShapeMove(false); });
+    // コールバック: 履歴復元では未確定の作成・移動・パンを残さない。
+    connect(m_document,&DrawingDocument::historyAboutToRestore,this,[this] {
+        endShapeMove(false); cancelDrawing(); m_panning = false; m_selectionMenu->hide(); updateInteractionCursor();
+    });
     connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeChanged, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeRemoved, this, &DrawingView::removeShapeItem);
@@ -123,6 +184,17 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
 
     connect(settings, &DrawingSettings::scaleChanged, this, &DrawingView::updatePaper);
     updatePaper();
+}
+
+/// @brief Qtの基底ビューがシーンを切り離す際、破棄済みの派生メンバーへ通知させない。
+DrawingView::~DrawingView()
+{
+    disconnect(scene(), nullptr, this, nullptr);
+    disconnect(m_document, nullptr, this, nullptr);
+    disconnect(horizontalScrollBar(), nullptr, this, nullptr);
+    disconnect(verticalScrollBar(), nullptr, this, nullptr);
+    // 文書破棄による選択解除通知より先にモデルを解放する。Qtの子リストからも自動で外れる。
+    delete m_selectionModel;
 }
 
 /// @brief 有効なズーム倍率を設定する。実寸座標を保ち、不正倍率ではfalseを返す。
@@ -325,22 +397,42 @@ void DrawingView::syncShape(const QUuid &id)
         const auto circle = std::get<CircleGeometry>(data->geometryMm);
         // radius: 円の外接矩形の対角へ向かう半径ベクトル（実寸mm）。
         const QPointF radius(circle.radiusMm, circle.radiusMm);
-        if (!item) item = scene()->addEllipse({}, shapePen(), shapeBrush());
+        if (!item) {
+            item = new OpenShapeItem<QGraphicsEllipseItem>(); scene()->addItem(item);
+            qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setPen(shapePen());
+            qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setBrush(shapeBrush());
+        }
         qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setRect(QRectF(circle.centerMm - radius, circle.centerMm + radius));
+        static_cast<OpenShapeItem<QGraphicsEllipseItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
     case ShapeKind::Polygon:
         tool = DrawingTool::Polygon;
-        if (!item) item = scene()->addPolygon({}, shapePen(), shapeBrush());
+        if (!item) {
+            item = new OpenShapeItem<QGraphicsPolygonItem>(); scene()->addItem(item);
+            qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setPen(shapePen());
+            qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setBrush(shapeBrush());
+        }
         qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setPolygon(std::get<QPolygonF>(data->geometryMm));
+        static_cast<OpenShapeItem<QGraphicsPolygonItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
+    item->setTransform(data->rectangleTransform());
     item->setPos(data->positionMm);
     if (added) {
         item->setFlag(QGraphicsItem::ItemIsSelectable);
         item->setData(ShapeIdRole, id); item->setData(ShapeToolRole, QVariant::fromValue(tool));
         m_shapeGraphics.insert(id, item); m_shapes.append(item);
     }
+    // Undoで途中の図形を復元した場合も、モデルの描画順へ表示順・ヒット判定順を揃える。
+    m_shapes.clear();
+    // shape: 文書が保持する元の描画順の図形。
+    for (const auto &shape : m_document->shapes()) {
+        // graphics: すでに復元済みの表示アイテム。シーンが所有する。
+        auto *graphics = m_shapeGraphics.value(shape.id,nullptr);
+        if (graphics) { graphics->setZValue(m_shapes.size()); m_shapes.append(graphics); }
+    }
+    if (m_vertexMarker) m_vertexMarker->setZValue(m_shapes.size()+1);
     updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
 }
 
@@ -352,7 +444,7 @@ void DrawingView::removeShapeItem(const QUuid &id)
     auto *item = m_shapeGraphics.take(id);
     if (!item) return;
     m_shapes.removeOne(item); delete item;
-    updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
+    updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
 }
 
 /// @brief 現在選択されている、管理対象の表示アイテムを描画順で返す。
@@ -361,23 +453,26 @@ QList<QGraphicsItem*> DrawingView::selectedShapeItems() const
     // result: 描画順に集める選択済みアイテムの参照リスト。所有権はシーンに残る。
     QList<QGraphicsItem*> result;
     // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
-    for (auto *item : m_shapes) if (item->isSelected()) result.append(item);
+    for (auto *item : m_shapes) if (m_selectionModel->contains(shapeId(item))) result.append(item);
     return result;
 }
 
-/// @brief 選択表示の再描画と選択状態・操作案内の変更を通知する。
-void DrawingView::notifySelection()
+/// @brief 選択IDの正本をQt描画アイテムへ反映し、逆方向の再入を抑える。
+void DrawingView::syncSelectionDisplay()
 {
-    viewport()->update(); emit shapeSelectionChanged(); emit drawingHintChanged(drawingHint());
+    if (m_syncingSelection) return;
+    // syncing: アイテムの選択フラグ変更によるシーン通知をこのスコープだけ抑制する。
+    QScopedValueRollback<bool> syncing(m_syncingSelection, true);
+    // item: シーンが所有する表示アイテム。選択モデルに一致する見た目だけを設定する。
+    for (auto *item : m_shapes) item->setSelected(m_selectionModel->contains(shapeId(item)));
+    viewport()->update();
 }
 
 /// @brief 未確定の移動を取り消し、全図形の選択を解除する。
 void DrawingView::clearShapeSelection()
 {
     endShapeMove(false);
-    // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
-    for (auto *item : m_shapes) item->setSelected(false);
-    notifySelection();
+    m_selectionModel->clear();
 }
 
 /// @brief 画面座標から手前の図形を探す。細線も6pxの許容幅で判定する。
@@ -396,9 +491,9 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
         const auto data = m_document->shape(shapeId(item));
         if (!data) continue;
         // path: 実寸形状を画面座標へ変換した選択判定用パス（px）。
-        const QPainterPath path = viewportTransform().map(item->mapToScene(data->localPath()));
+        const QPainterPath path = viewportTransform().map(data->localPath().translated(item->pos()));
         // filled: 選択判定で線の近傍だけでなく面の内部も対象にするかどうか。
-        const bool filled = data->kind() != ShapeKind::Line;
+        const bool filled = data->isFilled();
         if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
     }
     return nullptr;
@@ -452,9 +547,7 @@ void DrawingView::contextMenuEvent(QContextMenuEvent *event)
     endShapeMove(false);
     // hit: クリック位置で見つかった最前面の図形アイテム。
     auto *hit = shapeAt(event->pos());
-    if (hit && !hit->isSelected()) {
-        clearShapeSelection(); hit->setSelected(true); notifySelection();
-    }
+    if (hit && !m_selectionModel->contains(shapeId(hit))) m_selectionModel->selectOnly(shapeId(hit));
     m_selectionMenu->actions().first()->setEnabled(!selectedShapeItems().isEmpty());
     m_selectionMenu->popup(event->globalPos()); event->accept();
 }
@@ -678,15 +771,15 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
         // shift: 押下時にShiftが指定されているかどうか。
         const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
         if (!hit) { if (!shift) clearShapeSelection(); }
-        else if (shift) hit->setSelected(!hit->isSelected());
+        else if (shift) m_selectionModel->toggle(shapeId(hit));
         else {
-            if (!hit->isSelected()) { clearShapeSelection(); hit->setSelected(true); }
+            if (!m_selectionModel->contains(shapeId(hit))) m_selectionModel->selectOnly(shapeId(hit));
             m_selectionPressed = true; m_selectionPressPixel = event->pos();
             m_selectionPressMm = mapToScene(event->pos());
             // item: シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
             for (auto *item : selectedShapeItems()) m_moveOrigins.append({item, item->pos()});
         }
-        notifySelection(); event->accept(); return;
+        event->accept(); return;
     }
     if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_ignoreDrawingRelease = false;

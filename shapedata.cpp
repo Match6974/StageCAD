@@ -16,6 +16,35 @@ ShapeKind ShapeData::kind() const
     return ShapeKind::Polygon;
 }
 
+/// @brief 四角形のローカル左下を動かさず、CAD座標で反時計回りに回転する。
+QTransform ShapeData::rectangleTransform() const
+{
+    // transform: 配置移動量とは分離した四角形の回転変換。
+    QTransform transform;
+    if (const auto *rect = std::get_if<QRectF>(&geometryMm)) {
+        transform.translate(rect->x(),rect->y()); transform.rotate(rectangleAngleDeg);
+        transform.translate(-rect->x(),-rect->y());
+    }
+    return transform;
+}
+/// @brief サイズ・角度変更時に保持する基準点の実寸座標を返す。
+/// @param fraction 基準点の相対位置。CADの下側がY=0。
+QPointF ShapeData::referencePoint(QPointF fraction) const
+{
+    if (const auto *rect = std::get_if<QRectF>(&geometryMm))
+        return rectangleTransform().map(rect->topLeft()+QPointF(rect->width()*fraction.x(),rect->height()*fraction.y()))+positionMm;
+    // bounds: 多角形の配置済み外接範囲（実寸mm）。
+    const QRectF bounds = boundsMm();
+    return bounds.topLeft()+QPointF(bounds.width()*fraction.x(),bounds.height()*fraction.y());
+}
+/// @brief 円弧・開いた多角形では、内部や閉じていない辺を選択対象にしない。
+bool ShapeData::isFilled() const
+{
+    if (kind() == ShapeKind::Line) return false;
+    if (const auto *circle = std::get_if<CircleGeometry>(&geometryMm)) return circle->sweepAngleDeg == 360;
+    return kind() != ShapeKind::Polygon || polygonClosed;
+}
+
 /// @brief 配置移動量を加える前の形状を、描画・選択判定用のパスへ変換する。
 QPainterPath ShapeData::localPath() const
 {
@@ -25,13 +54,20 @@ QPainterPath ShapeData::localPath() const
     if (const auto *line = std::get_if<QLineF>(&geometryMm)) {
         path.moveTo(line->p1()); path.lineTo(line->p2());
     // rect: 処理対象の矩形形状またはその描画アイテム。
-    } else if (const auto *rect = std::get_if<QRectF>(&geometryMm)) path.addRect(*rect);
+    } else if (const auto *rect = std::get_if<QRectF>(&geometryMm)) { path.addRect(*rect); path = rectangleTransform().map(path); }
     // circle: 対象の円形状またはその描画アイテム。
     else if (const auto *circle = std::get_if<CircleGeometry>(&geometryMm))
-        path.addEllipse(circle->centerMm, circle->radiusMm, circle->radiusMm);
+    {
+        if (circle->sweepAngleDeg == 360) path.addEllipse(circle->centerMm,circle->radiusMm,circle->radiusMm);
+        else {
+            // extent: 円弧の元になる真円の外接範囲（実寸mm）。Qtの角度をCADの上向きYへ変換する。
+            const QRectF extent(circle->centerMm-QPointF(circle->radiusMm,circle->radiusMm),QSizeF(2*circle->radiusMm,2*circle->radiusMm));
+            path.arcMoveTo(extent,-circle->startAngleDeg); path.arcTo(extent,-circle->startAngleDeg,-circle->sweepAngleDeg);
+        }
+    }
     // polygon: 頂点順を保持した多角形の形状または描画アイテム。
     else if (const auto *polygon = std::get_if<QPolygonF>(&geometryMm)) {
-        path.addPolygon(*polygon); path.closeSubpath();
+        path.addPolygon(*polygon); if (polygonClosed) path.closeSubpath();
     }
     return path;
 }
@@ -76,6 +112,7 @@ bool ShapeData::validPolygon(const QPolygonF &points)
 /// @brief ID・形状・配置が有効かを確認する。大きさ0や範囲外の形状は拒否する。
 bool ShapeData::isValid() const
 {
+    if (!std::isfinite(rectangleAngleDeg) || (kind() != ShapeKind::Rectangle && rectangleAngleDeg != 0)) return false;
     if (id.isNull() || !std::isfinite(positionMm.x()) || !std::isfinite(positionMm.y())) return false;
     // line: 対象の直線形状またはその描画アイテム。
     if (const auto *line = std::get_if<QLineF>(&geometryMm)) {
@@ -86,11 +123,23 @@ bool ShapeData::isValid() const
             || !(rect->width() > 0) || !(rect->height() > 0)) return false;
     // circle: 対象の円形状またはその描画アイテム。
     } else if (const auto *circle = std::get_if<CircleGeometry>(&geometryMm)) {
+        if (!std::isfinite(circle->startAngleDeg) || !std::isfinite(circle->sweepAngleDeg)
+            || circle->sweepAngleDeg <= 0 || circle->sweepAngleDeg > 360) return false;
         if (!validPoint(circle->centerMm) || !std::isfinite(circle->radiusMm) || circle->radiusMm <= 0) return false;
         // extent: 円の外接矩形を得るための半径ベクトル（実寸mm）。
         const QPointF extent(circle->radiusMm, circle->radiusMm);
         if (!validPoint(circle->centerMm - extent) || !validPoint(circle->centerMm + extent)) return false;
-    } else if (!validPolygon(std::get<QPolygonF>(geometryMm))) return false;
+    } else {
+        // points: 開閉に応じて検証する頂点列。開いた形状は2点の線分まで許可する。
+        const auto &points = std::get<QPolygonF>(geometryMm);
+        if (polygonClosed) { if (!validPolygon(points)) return false; }
+        else {
+            if (points.size() < 2) return false;
+            // point: 有限かつ範囲内である必要がある各頂点（実寸mm）。
+            for (const auto point : points) if (!validPoint(point)) return false;
+            if (points.boundingRect().width() == 0 && points.boundingRect().height() == 0) return false;
+        }
+    }
     // bounds: 検証・描画・測定対象の外接矩形（特記がなければ実寸mm）。
     const QRectF bounds = boundsMm();
     return validPoint(bounds.topLeft()) && validPoint(bounds.bottomRight());

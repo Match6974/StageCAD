@@ -15,6 +15,8 @@
 
 class DrawingSettings;
 class DrawingDocument;
+class QGraphicsEllipseItem;
+class ShapeSelectionModel;
 class QMenu;
 class QGraphicsRectItem;
 
@@ -24,10 +26,16 @@ class DrawingView : public QGraphicsView
 {
     Q_OBJECT
 public:
+    /// @brief 情報パレットで選択した多角形の頂点を画面上に示す。
+    /// @param point 用紙中心基準の実寸座標（mm）。
+    /// @param visible マーカーを表示するかどうか。
+    void highlightVertex(QPointF point, bool visible);
     /// @brief 図形モデル・シーン・用紙を作り、座標表示と入力処理を接続する。
     /// @param settings 作業領域の縮尺・用紙設定。参照先は呼び出し側が管理する。
     /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
     explicit DrawingView(DrawingSettings *settings, QWidget *parent = nullptr);
+    /// @brief 基底ビューの破棄で選択通知が発生する前に、接続と選択モデルを解放する。
+    ~DrawingView() override;
     /// @brief 用紙表示の基準倍率に対する画面ズーム倍率を返す。
     double displayZoom() const { return m_displayZoom; }
     /// @brief 有効なズーム倍率を設定する。実寸座標を保ち、不正倍率ではfalseを返す。
@@ -69,6 +77,8 @@ public:
     bool deleteSelectedShapes();
     /// @brief このビューが所有する図形モデルを返す。確定データの変更窓口として使う。
     DrawingDocument *document() const { return m_document; }
+    /// @brief プロパティ表示等と共有する、UUIDを正本とした選択モデルを返す。
+    ShapeSelectionModel *selectionModel() const { return m_selectionModel; }
     /// @brief このビューが管理する表示アイテムの図形UUIDを返す。管理外なら空のUUID。
     /// @param item シーンが所有する図形の表示アイテムへの参照。正本データはUUIDでモデルから取得する。
     QUuid shapeId(const QGraphicsItem *item) const;
@@ -118,7 +128,7 @@ signals:
     /// @brief 確定図形が追加されたツールの種類を通知する。
     /// @param tool 現在処理するツールの種類。
     void shapeCreated(DrawingTool tool);
-    /// @brief 図形の選択状態が更新されたことを通知する。
+    /// @brief 選択ID集合が実際に変化した後に通知する。移動や同じ選択の再指定では通知しない。
     void shapeSelectionChanged();
 
 protected:
@@ -158,6 +168,8 @@ protected:
     void drawForeground(QPainter *painter, const QRectF &rect) override;
 
 private:
+    // m_vertexMarker: 選択頂点を示すシーン所有のマーカー。画面サイズを固定する。
+    QGraphicsEllipseItem *m_vertexMarker = nullptr;
     /// @brief 縮尺に応じて用紙範囲と表示変換を更新する。確定図形の実寸は維持する。
     void updatePaper();
     /// @brief 指定中心を保ち、用紙換算と画面ズームを合わせた表示変換を適用する。
@@ -185,8 +197,8 @@ private:
     /// @brief 画面座標から手前の図形を探す。細線も6pxの許容幅で判定する。
     /// @param viewportPoint 入力・表示位置を比較する画面座標（px）。
     QGraphicsItem *shapeAt(QPoint viewportPoint) const;
-    /// @brief 選択表示の再描画と選択状態・操作案内の変更を通知する。
-    void notifySelection();
+    /// @brief 選択モデルを表示へ投影する。Qt側の選択イベントの再入を防ぐ。
+    void syncSelectionDisplay();
     /// @brief ドラッグの一時状態を終了する。確定時だけモデルを更新し、取消時は元の表示へ戻す。
     /// @param commit 一時的な移動をモデルへ確定するか、元の位置へ戻すか。
     void endShapeMove(bool commit);
@@ -249,6 +261,10 @@ private:
     std::optional<QPointF> m_draftHover;
     // m_document: ビューがQObjectの子として所有する、確定済み図形のモデル。
     DrawingDocument *m_document;
+    // m_selectionModel: ビューが所有する選択UUIDの正本。描画アイテムを保持しない。
+    ShapeSelectionModel *m_selectionModel;
+    // m_syncingSelection: 選択表示の反映中にシーンの通知が再入するのを防ぐガード。
+    bool m_syncingSelection = false;
     // m_shapeGraphics: 図形UUIDから、シーンが所有する表示アイテムを引く対応表。
     QHash<QUuid, QGraphicsItem*> m_shapeGraphics;
     // m_shapes: シーンが所有する描画アイテムへの参照を表示順に保持する。正本の形状はモデルにある。

@@ -21,6 +21,7 @@ class QSpinBox;
 class QTabWidget;
 class PdfCalibrationDialog;
 class ToolPalette;
+class ObjectInfoPanel;
 class QToolBar;
 class QDoubleSpinBox;
 class QPushButton;
@@ -64,6 +65,8 @@ private:
     void updatePdfActions();
     /// @brief 現在のツールと作成状態に応じて、座標入力・多角形完了ボタンを更新する。
     void updateDrawingControls();
+    /// @brief 選択モデルから件数・単独選択の種類を読み取り、状態欄を更新する。
+    void updateSelectionDisplay();
 
     // ui: Qt Designer生成のUI補助オブジェクト。MainWindowのデストラクタで解放する。
     Ui::MainWindow *ui;
@@ -75,6 +78,8 @@ private:
     QLabel *m_scaleLabel;
     // m_coordinates: カーソルの実寸座標を表示するラベル。メイン画面が所有する。
     QLabel *m_coordinates;
+    // m_selectionStatus: メイン画面が所有する、現在の選択数と種類を示すラベル。
+    QLabel *m_selectionStatus;
     // m_paperCoverage: 用紙が覆う実寸mm範囲を表示するラベル。メイン画面が所有する。
     QLabel *m_paperCoverage;
     // m_pdfPlacement: メイン画面が子QObjectとして所有するPDF配置モデル。
@@ -87,6 +92,10 @@ private:
     QTabWidget *m_tabs;
     // m_scaleAction: 作業領域の縮尺設定を開くアクション。
     QAction *m_scaleAction;
+    // m_undoAction: 編集メニューと表示バーで共有する、文書操作を戻すアクション。
+    QAction *m_undoAction;
+    // m_redoAction: 戻した文書操作をやり直す共有アクション。
+    QAction *m_redoAction;
     // m_importPdfAction: PDFの選択・取り込みを開始するアクション。
     QAction *m_importPdfAction;
     // m_calibratePdfAction: PDF距離補正ダイアログを開くアクション。
@@ -113,6 +122,8 @@ private:
     QString m_pdfPath;
     // m_toolPalette: 基本ドックが所有する、描画・選択ツールのパレット。
     ToolPalette *m_toolPalette;
+    // m_objectInfoPanel: 右側ドックが所有する、選択図形のプロパティ表示と直線・四角形・円の数値編集。
+    ObjectInfoPanel *m_objectInfoPanel;
     // m_toolModeLabel: 選択ツールとモードを表示するラベル。親ツールバーが所有する。
     QLabel *m_toolModeLabel;
     // m_toolOptionsToolbar: ツールのモードと座標入力欄を置く、メイン画面所有のツールバー。

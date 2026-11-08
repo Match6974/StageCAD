@@ -5,6 +5,8 @@
 
 #include "mainwindow.h"
 #include "drawingview.h"
+#include "drawingdocument.h"
+#include "shapeselectionmodel.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfplacement.h"
 
@@ -104,6 +106,69 @@ int main(int argc, char **argv)
                                  Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
                 QApplication::sendEvent(view->viewport(), &move);
             }
+        }
+        if (scenario == "floating-object-info" || scenario == "closed-object-info") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 情報パレットに表示する図形と選択状態を作るCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 終了直前にも情報表示が有効な円のUUID。
+            const auto id = view->document()->addShape(CircleGeometry{{0,0},10});
+            view->selectionModel()->selectOnly(id);
+            // dock: 切り離しまたは非表示の状態で破棄する情報パレット。
+            auto *dock = w.findChild<QDockWidget*>("objectInfoDock");
+            if (scenario == "floating-object-info") dock->setFloating(true); else dock->close();
+        }
+        if (scenario == "editing-line") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 直線と選択状態を所有するビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 編集途中でも確定形状を保ったまま閉じる対象の直線UUID。
+            const auto id = view->document()->addShape(QLineF(0,0,100,0));
+            view->selectionModel()->selectOnly(id);
+            // edit: 未確定の不正値を残して閉じる、パネル所有の入力欄。
+            auto *edit = w.findChild<QLineEdit*>("edit_endX");
+            edit->setText("invalid"); edit->setModified(true); edit->setFocus();
+        }
+        if (scenario == "editing-rectangle" || scenario == "editing-circle") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 終了時まで確定図形と選択状態を保持するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // rectangle: 幅の編集中に閉じるか、円の半径編集中に閉じるかの区別。
+            const bool rectangle = scenario == "editing-rectangle";
+            // id: 編集対象の確定図形のUUID。
+            const auto id = rectangle ? view->document()->addShape(QRectF(0,0,100,50))
+                                      : view->document()->addShape(CircleGeometry{{0,0},10});
+            // data: 回転矩形または開いた円弧を、選択・編集したまま終了するための候補。
+            auto data = *view->document()->shape(id);
+            if (rectangle) data.rectangleAngleDeg = 30;
+            else std::get<CircleGeometry>(data.geometryMm).sweepAngleDeg = 120;
+            view->document()->updateShape(data);
+            view->selectionModel()->selectOnly(id);
+            // edit: 不正な下書きを残して閉じる、パネル所有の寸法入力欄。
+            auto *edit = w.findChild<QLineEdit*>(rectangle ? "edit_width" : "edit_radius");
+            edit->setText("invalid"); edit->setModified(true); edit->setFocus();
+            if (rectangle) w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
+        }
+        if (scenario == "editing-polygon") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 頂点マーカーと選択を保持したまま終了するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 開いた形状へ変更して頂点を選択する多角形UUID。
+            const auto id = view->document()->addShape(QPolygonF({{0,0},{100,0},{50,50}}));
+            // data: 開閉状態を変更する候補コピー。
+            auto data = *view->document()->shape(id); data.polygonClosed = false;
+            view->document()->updateShape(data); view->selectionModel()->selectOnly(id);
+            // edit: 未確定の頂点座標を残して閉じる入力欄。
+            auto *edit = w.findChild<QLineEdit*>("edit_vertexX"); edit->setText("invalid"); edit->setModified(true);
+            w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
+        }
+        if (scenario == "history") {
+            // view: 未使用のRedo分岐と確定済み履歴を保持したまま破棄するビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 作成・編集・削除の履歴へ記録する円のUUID。
+            const auto id = view->document()->addShape(CircleGeometry{{0,0},10});
+            view->document()->setCircleRadius(id,20); view->document()->removeShapes({id});
+            view->document()->undo(); view->selectionModel()->selectOnly(id);
         }
         if (!w.close()) app.exit(6);
     });

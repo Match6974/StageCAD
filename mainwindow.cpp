@@ -7,6 +7,9 @@
 #include "ui_mainwindow.h"
 #include "drawingsettings.h"
 #include "drawingview.h"
+#include "drawingdocument.h"
+#include "shapeselectionmodel.h"
+#include "objectinfopanel.h"
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
@@ -32,6 +35,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolBar>
+#include <QKeySequence>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -91,6 +95,20 @@ MainWindow::MainWindow(QWidget *parent)
     toolbar->setObjectName("drawingToolbar");
     toolbar->setMovable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    // editMenu: 標準ショートカットと同じ履歴を操作する編集メニュー。
+    auto *editMenu = menuBar()->addMenu(tr("編集"));
+    m_undoAction = new QAction(style()->standardIcon(QStyle::SP_ArrowBack),tr("取り消し"),this);
+    m_redoAction = new QAction(style()->standardIcon(QStyle::SP_ArrowForward),tr("やり直し"),this);
+    m_undoAction->setObjectName("undoAction"); m_redoAction->setObjectName("redoAction");
+    m_undoAction->setShortcuts(QKeySequence::keyBindings(QKeySequence::Undo));
+    m_redoAction->setShortcuts(QKeySequence::keyBindings(QKeySequence::Redo));
+    editMenu->addAction(m_undoAction); editMenu->addAction(m_redoAction);
+    toolbar->addAction(m_undoAction); toolbar->addAction(m_redoAction); toolbar->addSeparator();
+    // コールバック: 利用可能な場合だけ文書の確定操作を1件戻す。
+    connect(m_undoAction,&QAction::triggered,this,[this] { m_drawingView->document()->undo(); });
+    // コールバック: 利用可能な場合だけ戻した操作を1件やり直す。
+    connect(m_redoAction,&QAction::triggered,this,[this] { m_drawingView->document()->redo(); });
+    connect(m_drawingView->document(),&DrawingDocument::historyChanged,this,&MainWindow::updatePdfActions);
     m_importPdfAction = toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("PDF取り込み…"));
     m_importPdfAction->setObjectName("importPdfAction");
     m_importPdfAction->setToolTip(tr("現在のPDFを置き換えて作業領域に取り込みます。元のPDFファイルは変更しません。"));
@@ -150,6 +168,15 @@ MainWindow::MainWindow(QWidget *parent)
     // viewMenu: パレットの再表示を提供する表示メニュー。
     auto *viewMenu = menuBar()->addMenu(tr("表示"));
     viewMenu->addAction(toolDock->toggleViewAction());
+    // infoDock: メイン画面が所有する、右列のオブジェクト情報パレット。
+    auto *infoDock = new QDockWidget(tr("オブジェクト情報"), this);
+    infoDock->setObjectName("objectInfoDock"); infoDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    infoDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    m_objectInfoPanel = new ObjectInfoPanel(m_drawingView->document(), m_drawingView->selectionModel(), infoDock);
+    connect(m_objectInfoPanel,&ObjectInfoPanel::vertexHighlighted,m_drawingView,&DrawingView::highlightVertex);
+    infoDock->setWidget(m_objectInfoPanel); addDockWidget(Qt::RightDockWidgetArea, infoDock);
+    resizeDocks({infoDock}, {260}, Qt::Horizontal);
+    viewMenu->addAction(infoDock->toggleViewAction());
 
     addToolBarBreak(Qt::TopToolBarArea);
     m_toolOptionsToolbar = addToolBar(tr("ツール"));
@@ -221,6 +248,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_coordinates = new QLabel(this); m_coordinates->setObjectName("coordinatesLabel");
     m_paperCoverage = new QLabel(this); m_paperCoverage->setObjectName("paperCoverageLabel");
     statusBar()->addWidget(m_coordinates, 1); statusBar()->addPermanentWidget(m_paperCoverage);
+    m_selectionStatus = new QLabel(this); m_selectionStatus->setObjectName("selectionStatusLabel");
+    statusBar()->addPermanentWidget(m_selectionStatus);
+    connect(m_drawingView->selectionModel(), &ShapeSelectionModel::selectionChanged,
+            this, &MainWindow::updateSelectionDisplay);
+    updateSelectionDisplay();
     // point: 用紙中心基準の実寸座標（mm）。
     // コールバック: カーソルの実寸X/Yを小数点以下2桁でステータス欄へ表示する。
     connect(m_drawingView, &DrawingView::cursorPositionChanged, this, [this](QPointF point) {
@@ -411,9 +443,13 @@ void MainWindow::updatePdfActions()
     // workspace: CAD作業領域タブが現在選択されているかどうか。
     const bool workspace = m_tabs->currentIndex() == 0;
     m_drawingView->setDrawingEnabled(idle && workspace);
+    m_selectionStatus->setVisible(workspace);
+    m_objectInfoPanel->setEnabled(idle && workspace);
     updateDrawingControls();
     m_toolPalette->setEnabled(idle && workspace);
     m_toolOptionsToolbar->setEnabled(idle && workspace);
+    m_undoAction->setEnabled(idle && workspace && m_drawingView->document()->canUndo());
+    m_redoAction->setEnabled(idle && workspace && m_drawingView->document()->canRedo());
     m_importPdfAction->setEnabled(idle);
     m_calibratePdfAction->setEnabled(idle && workspace && m_pdfPlacement->hasPage());
     m_scaleAction->setEnabled(idle && workspace);
@@ -436,6 +472,28 @@ void MainWindow::updateDrawingControls()
     m_finishPolygonButton->setEnabled(m_drawingView->canFinishPolygon());
 }
 
+/// @brief 選択モデルの現在値から、選択件数と単独図形の種類を表示する。
+void MainWindow::updateSelectionDisplay()
+{
+    // selection: ビュー所有の選択モデル。表示アイテムへの参照は持ち込まない。
+    const auto *selection = m_drawingView->selectionModel();
+    // single: 単独選択の場合だけ取得できる、現在の図形データのコピー。
+    const auto single = selection->singleShape();
+    if (!single) {
+        m_selectionStatus->setText(tr("選択: %1個").arg(selection->count()));
+        return;
+    }
+    // name: 単独選択している図形の種類を示す表示文字列。
+    QString name;
+    switch (single->kind()) {
+    case ShapeKind::Line: name = tr("直線"); break;
+    case ShapeKind::Rectangle: name = tr("四角"); break;
+    case ShapeKind::Circle: name = tr("円"); break;
+    case ShapeKind::Polygon: name = tr("多角形"); break;
+    }
+    m_selectionStatus->setText(tr("選択: %1（1個）").arg(name));
+}
+
 /// @brief 縮尺ダイアログを開き、OKで確定された場合だけ作業領域の設定へ反映する。
 void MainWindow::editScale()
 {
@@ -456,5 +514,10 @@ void MainWindow::updateScaleDisplay()
         .arg(realSize.width(), 0, 'g', 15).arg(realSize.height(), 0, 'g', 15));
 }
 
-/// @brief Designer生成のUI補助オブジェクトを解放する。子QObjectはQtの親子関係で破棄される。
-MainWindow::~MainWindow() { delete ui; }
+/// @brief 頂点表示の接続を切り離してUI補助オブジェクトを解放する。子QObjectはQtが破棄する。
+MainWindow::~MainWindow()
+{
+    // 子ビューの派生クラス破棄後にモデル破棄通知から頂点マーカーを操作させない。
+    disconnect(m_objectInfoPanel,nullptr,m_drawingView,nullptr);
+    delete ui;
+}
