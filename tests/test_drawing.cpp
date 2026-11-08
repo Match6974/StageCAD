@@ -10,6 +10,8 @@
 #include "mainwindow.h"
 #include "toolpalette.h"
 #include "pdfplacement.h"
+#include "objectinfopanel.h"
+#include <QDockWidget>
 #include <QAction>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -93,21 +95,33 @@ private slots:
         // tabs: 作業領域とPDF参照を切り替えるタブ。
         auto *tabs = window.findChild<QTabWidget*>("workspaceTabs");
         QVERIFY(view && status && tabs); QVERIFY(status->text().contains("0"));
+        // info: 右側の情報パレット。選択モデルの変更へ追従する。
+        auto *info = window.findChild<ObjectInfoPanel*>();
+        // dock: 表示・切り離し・再表示を検証する、メイン画面所有の情報ドック。
+        auto *dock = window.findChild<QDockWidget*>("objectInfoDock");
+        QVERIFY(info && dock); QCOMPARE(window.dockWidgetArea(dock), Qt::RightDockWidgetArea);
         // first: 単独選択時に種類が表示される円のUUID。
         const auto first = view->document()->addShape(CircleGeometry{{-40,0},15});
         // second: 複数選択状態を作る矩形のUUID。
         const auto second = view->document()->addShape(QRectF(20,-20,40,40));
         QVERIFY(view->selectionModel()->selectOnly(first)); QVERIFY(status->text().contains(QString::fromUtf8("円")));
+        QCOMPARE(info->findChild<QLabel*>("property_radius")->text(), QString("15 mm"));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-properties.png"));
         QVERIFY(view->selectionModel()->toggle(second)); QVERIFY(status->text().contains("2"));
+        QVERIFY(info->findChild<QLabel*>("property_radius")->text().isEmpty());
+        dock->setFloating(true); QTRY_VERIFY(dock->isFloating());
+        dock->resize(300,400); dock->setFloating(false); QTRY_VERIFY(!dock->isFloating());
+        dock->close(); QVERIFY(!dock->isVisible()); dock->toggleViewAction()->trigger(); QTRY_VERIFY(dock->isVisible());
+        QCOMPARE(view->selectionModel()->count(), 2);
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-selection.png"));
-        tabs->setCurrentIndex(1); QVERIFY(!status->isVisible()); QVERIFY(!view->deleteSelectedShapes());
-        QCOMPARE(view->selectionModel()->count(), 2); tabs->setCurrentIndex(0); QVERIFY(status->isVisible());
+        tabs->setCurrentIndex(1); QVERIFY(!status->isVisible()); QVERIFY(!info->isEnabled()); QVERIFY(!view->deleteSelectedShapes());
+        QCOMPARE(view->selectionModel()->count(), 2); tabs->setCurrentIndex(0); QVERIFY(status->isVisible()); QVERIFY(info->isEnabled());
         QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
         window.findChild<QAction*>("calibratePdfAction")->trigger();
         // dialog: 開いている補正画面。操作制限を解除するためにキャンセルする。
         auto *dialog = window.findChild<PdfCalibrationDialog*>(); QVERIFY(dialog);
-        QVERIFY(!view->deleteSelectedShapes()); QCOMPARE(view->selectionModel()->count(), 2);
-        dialog->reject(); QCOMPARE(view->selectionModel()->count(), 2);
+        QVERIFY(!view->deleteSelectedShapes()); QVERIFY(!info->isEnabled()); QCOMPARE(view->selectionModel()->count(), 2);
+        dialog->reject(); QVERIFY(info->isEnabled()); QCOMPARE(view->selectionModel()->count(), 2);
         QTest::keyClick(view, Qt::Key_Escape); QVERIFY(status->text().contains("0"));
         QVERIFY(view->selectedShapeItems().isEmpty());
     }

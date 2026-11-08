@@ -5,6 +5,8 @@
 
 #include "mainwindow.h"
 #include "drawingview.h"
+#include "drawingdocument.h"
+#include "shapeselectionmodel.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfplacement.h"
 
@@ -104,6 +106,17 @@ int main(int argc, char **argv)
                                  Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
                 QApplication::sendEvent(view->viewport(), &move);
             }
+        }
+        if (scenario == "floating-object-info" || scenario == "closed-object-info") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 情報パレットに表示する図形と選択状態を作るCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 終了直前にも情報表示が有効な円のUUID。
+            const auto id = view->document()->addShape(CircleGeometry{{0,0},10});
+            view->selectionModel()->selectOnly(id);
+            // dock: 切り離しまたは非表示の状態で破棄する情報パレット。
+            auto *dock = w.findChild<QDockWidget*>("objectInfoDock");
+            if (scenario == "floating-object-info") dock->setFloating(true); else dock->close();
         }
         if (!w.close()) app.exit(6);
     });

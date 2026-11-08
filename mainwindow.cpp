@@ -8,6 +8,7 @@
 #include "drawingsettings.h"
 #include "drawingview.h"
 #include "shapeselectionmodel.h"
+#include "objectinfopanel.h"
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
@@ -151,6 +152,14 @@ MainWindow::MainWindow(QWidget *parent)
     // viewMenu: パレットの再表示を提供する表示メニュー。
     auto *viewMenu = menuBar()->addMenu(tr("表示"));
     viewMenu->addAction(toolDock->toggleViewAction());
+    // infoDock: メイン画面が所有する、右列のオブジェクト情報パレット。
+    auto *infoDock = new QDockWidget(tr("オブジェクト情報"), this);
+    infoDock->setObjectName("objectInfoDock"); infoDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    infoDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    m_objectInfoPanel = new ObjectInfoPanel(m_drawingView->document(), m_drawingView->selectionModel(), infoDock);
+    infoDock->setWidget(m_objectInfoPanel); addDockWidget(Qt::RightDockWidgetArea, infoDock);
+    resizeDocks({infoDock}, {260}, Qt::Horizontal);
+    viewMenu->addAction(infoDock->toggleViewAction());
 
     addToolBarBreak(Qt::TopToolBarArea);
     m_toolOptionsToolbar = addToolBar(tr("ツール"));
@@ -418,6 +427,7 @@ void MainWindow::updatePdfActions()
     const bool workspace = m_tabs->currentIndex() == 0;
     m_drawingView->setDrawingEnabled(idle && workspace);
     m_selectionStatus->setVisible(workspace);
+    m_objectInfoPanel->setEnabled(idle && workspace);
     updateDrawingControls();
     m_toolPalette->setEnabled(idle && workspace);
     m_toolOptionsToolbar->setEnabled(idle && workspace);

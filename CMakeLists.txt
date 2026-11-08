@@ -12,6 +12,8 @@ qt_standard_project_setup()
 
 # アプリ本体とGUI回帰テストで共用する、手書きの実装・宣言ファイル。
 set(STAGECAD_SOURCES
+    objectinfopanel.h
+    objectinfopanel.cpp
     shapeselectionmodel.h
     shapeselectionmodel.cpp
     shapedata.h
@@ -128,6 +130,16 @@ if(BUILD_TESTING)
     add_test(NAME stagecad_selection_tests COMMAND stagecad_selection_tests)
     set_tests_properties(stagecad_selection_tests PROPERTIES TIMEOUT 30)
 
+    # 情報表示はPDFに依存せず、図形と選択モデルの読み取りだけで検証する。
+    qt_add_executable(stagecad_objectinfo_tests tests/test_objectinfo.cpp
+        objectinfopanel.cpp objectinfopanel.h shapeselectionmodel.cpp shapeselectionmodel.h
+        shapedata.cpp shapedata.h drawingdocument.cpp drawingdocument.h)
+    target_include_directories(stagecad_objectinfo_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(stagecad_objectinfo_tests PRIVATE Qt::Core Qt::Widgets Qt::Test)
+    add_test(NAME stagecad_objectinfo_tests COMMAND stagecad_objectinfo_tests)
+    set_tests_properties(stagecad_objectinfo_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     qt_add_executable(stagecad_shutdown_probe
         tests/shutdown_probe.cpp
         ${STAGECAD_SOURCES}
@@ -137,7 +149,7 @@ if(BUILD_TESTING)
         SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
     target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
     # scenarioは終了時の操作状態名。状態ごとに別プロセスで破棄処理を検証する。
-    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft selected-shapes moving-shapes)
+    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft selected-shapes moving-shapes floating-object-info closed-object-info)
         add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
         set_tests_properties(shutdown_${scenario} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
