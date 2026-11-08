@@ -12,6 +12,45 @@
 class DocumentTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 矩形・円の更新で実寸・種類・IDを維持し、不正値や無変更を通知しないことを検証する。
+    void rectangleAndCircleUpdates() {
+        // document: 移動済み形状へ寸法更新を適用する文書。
+        DrawingDocument document;
+        // rect: 更新後も同じUUIDと描画順を保つ四角形。
+        const auto rect = document.addShape(QRectF(10,20,30,40));
+        // circle: 中心位置を変えずに半径だけを変える円。
+        const auto circle = document.addShape(CircleGeometry{{30,40},5});
+        QVERIFY(document.translateShapes({rect,circle},{100,200}));
+        // changed: 有効な寸法更新だけを通知することを確認する監視。
+        QSignalSpy changed(&document,&DrawingDocument::shapeChanged);
+        // about: 無変更・不正値で更新準備の通知も発生しないことを確認する監視。
+        QSignalSpy about(&document,&DrawingDocument::aboutToChange);
+        QVERIFY(document.setRectangleBounds(rect,QRectF(110,220,30,40)));
+        QVERIFY(document.setCircleRadius(circle,5)); QCOMPARE(changed.count(),0); QCOMPARE(about.count(),0);
+        QVERIFY(document.setRectangleBounds(rect,QRectF(110,220,60,40)));
+        QVERIFY(document.setCircleRadius(circle,12.5)); QCOMPARE(changed.count(),2); QCOMPARE(about.count(),2);
+        QCOMPARE(document.shape(rect)->boundsMm(),QRectF(110,220,60,40));
+        QCOMPARE(document.shape(rect)->positionMm,QPointF());
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).centerMm,QPointF(130,240));
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).radiusMm,12.5);
+        QCOMPARE(document.shape(circle)->boundsMm(),QRectF(117.5,227.5,25,25));
+        QCOMPARE(document.shapes()[0].id,rect); QCOMPARE(document.shapes()[1].id,circle);
+        QVERIFY(!document.setRectangleBounds(rect,QRectF(110,220,0,40)));
+        QVERIFY(!document.setRectangleBounds(rect,QRectF(110,220,-1,40)));
+        QVERIFY(!document.setRectangleBounds(rect,QRectF(110,220,10000000,40)));
+        QVERIFY(!document.setRectangleBounds(rect,QRectF(0,0,std::numeric_limits<double>::quiet_NaN(),40)));
+        QVERIFY(!document.setRectangleBounds(circle,QRectF(0,0,10,10)));
+        // bad: 有限正値の検証と、中心を含めた外接範囲の検証に使う不正な半径（mm）。
+        for (const double bad : {0.0,-1.0,10000000.0,std::numeric_limits<double>::infinity(),
+                                std::numeric_limits<double>::quiet_NaN()})
+            QVERIFY(!document.setCircleRadius(circle,bad));
+        QVERIFY(!document.setCircleRadius(rect,10));
+        QVERIFY(!document.setCircleRadius(QUuid::createUuid(),10));
+        QVERIFY(!document.setRectangleBounds(QUuid::createUuid(),QRectF(0,0,10,10)));
+        QCOMPARE(changed.count(),2); QCOMPARE(about.count(),2);
+        QCOMPARE(document.shape(rect)->boundsMm(),QRectF(110,220,60,40));
+        QCOMPARE(document.shape(circle)->boundsMm(),QRectF(117.5,227.5,25,25));
+    }
     /// @brief 直線端点の更新でID・順序を保ち、不正値や同じ値の通知を抑えることを検証する。
     void lineEndpointUpdates() {
         // document: 直線の実寸更新を適用するモデル。

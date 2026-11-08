@@ -44,6 +44,15 @@ public:
     /// @param id 更新対象の直線UUID。他の種類や存在しないIDは拒否する。
     /// @param lineMm 始点・終点を用紙中心基準の実寸mmで表した線分。
     bool setLineEndpoints(const QUuid &id, const QLineF &lineMm);
+    /// @brief 四角形を実寸の矩形へ更新する。固定位置の計算は呼び出し側が決める。
+    /// ID・描画順を保持し、不正形状は拒否する。更新時の配置移動量は0へ統合する。
+    /// @param id 更新対象の四角形UUID。他の種類は拒否する。
+    /// @param boundsMm 配置移動量を反映済みの実寸矩形（mm）。幅・高さは正の値が必要。
+    bool setRectangleBounds(const QUuid &id, const QRectF &boundsMm);
+    /// @brief 円の中心を保って半径だけを更新する。真円とUUIDを維持する。
+    /// @param id 更新対象の円UUID。他の種類や存在しないIDは拒否する。
+    /// @param radiusMm 新しい半径（実寸mm）。有限の正値で、外接範囲も有効な値に限る。
+    bool setCircleRadius(const QUuid &id, double radiusMm);
 
 signals:
     /// @brief 有効な変更の直前を通知し、ビューの未確定操作を取り消せるようにする。

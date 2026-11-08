@@ -129,6 +129,21 @@ int main(int argc, char **argv)
             auto *edit = w.findChild<QLineEdit*>("edit_endX");
             edit->setText("invalid"); edit->setModified(true); edit->setFocus();
         }
+        if (scenario == "editing-rectangle" || scenario == "editing-circle") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 終了時まで確定図形と選択状態を保持するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // rectangle: 幅の編集中に閉じるか、円の半径編集中に閉じるかの区別。
+            const bool rectangle = scenario == "editing-rectangle";
+            // id: 編集対象の確定図形のUUID。
+            const auto id = rectangle ? view->document()->addShape(QRectF(0,0,100,50))
+                                      : view->document()->addShape(CircleGeometry{{0,0},10});
+            view->selectionModel()->selectOnly(id);
+            // edit: 不正な下書きを残して閉じる、パネル所有の寸法入力欄。
+            auto *edit = w.findChild<QLineEdit*>(rectangle ? "edit_width" : "edit_radius");
+            edit->setText("invalid"); edit->setModified(true); edit->setFocus();
+            if (rectangle) w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
+        }
         if (!w.close()) app.exit(6);
     });
     // コールバック: 正常に終了しない場合は5秒で異常終了し、テストの停止を検出する。

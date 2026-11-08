@@ -5,6 +5,8 @@
 #include "objectinfopanel.h"
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
+#include "rectangleanchorselector.h"
+#include <QToolButton>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -23,19 +25,19 @@ QLabel *field(ObjectInfoPanel &panel, const char *key)
     if (!label) QTest::qFail("Property field was not found", __FILE__, __LINE__);
     return label;
 }
-/// @brief 直線用の数値入力欄を取得する。
+/// @brief 図形プロパティの数値入力欄を取得する。
 /// @param panel 入力欄を所有する対象パネル。
 /// @param key startX・length等の項目名。
 QLineEdit *editor(ObjectInfoPanel &panel, const char *key)
 {
-    // edit: 直線グループが所有する対象の入力欄。
+    // edit: 形状グループまたは行コンテナが所有する対象の入力欄。
     auto *edit = panel.findChild<QLineEdit*>(QStringLiteral("edit_") + QString::fromLatin1(key));
-    if (!edit) QTest::qFail("Line editor was not found", __FILE__, __LINE__);
+    if (!edit) QTest::qFail("Shape editor was not found", __FILE__, __LINE__);
     return edit;
 }
 /// @brief ユーザーの数値入力とEnterによる項目確定を再現する。
 /// @param panel 入力先のプロパティパネル。
-/// @param key 確定する直線項目。
+/// @param key 確定する形状項目。
 /// @param text ロケールに合う数値文字列。
 void enter(ObjectInfoPanel &panel, const char *key, const QString &text)
 {
@@ -46,12 +48,139 @@ void enter(ObjectInfoPanel &panel, const char *key, const QString &text)
 
 }
 
-/// @brief 形状情報の表示、直線編集と、選択・形状変更への追従を検証する。
+/// @brief 形状情報の表示、数値編集と、選択・形状変更への追従を検証する。
 class ObjectInfoTests : public QObject {
     Q_OBJECT
 private slots:
     /// @brief 表示文字列の比較に使う小数点形式を統一する。
     void init() { QLocale::setDefault(QLocale::c()); }
+    /// @brief 9点マトリクスの見た目とCAD上の固定点の対応をテスト行として用意する。
+    void rectangleAnchors_data() {
+        QTest::addColumn<int>("anchorIndex"); QTest::addColumn<QPointF>("fraction");
+        QTest::newRow("top-left") << 0 << QPointF(0,1);
+        QTest::newRow("top-center") << 1 << QPointF(0.5,1);
+        QTest::newRow("top-right") << 2 << QPointF(1,1);
+        QTest::newRow("middle-left") << 3 << QPointF(0,0.5);
+        QTest::newRow("center") << 4 << QPointF(0.5,0.5);
+        QTest::newRow("middle-right") << 5 << QPointF(1,0.5);
+        QTest::newRow("bottom-left") << 6 << QPointF(0,0);
+        QTest::newRow("bottom-center") << 7 << QPointF(0.5,0);
+        QTest::newRow("bottom-right") << 8 << QPointF(1,0);
+    }
+    /// @brief 9点の各点をクリックし、幅・高さ変更後も基準点の実寸座標を保つことを検証する。
+    void rectangleAnchors() {
+        // anchorIndex: 画面の左上から行優先で並べた固定点番号。
+        QFETCH(int,anchorIndex);
+        // fraction: 左下(0,0)〜右上(1,1)として期待する固定点の相対位置。
+        QFETCH(QPointF,fraction);
+        // document: 移動済み四角形の形状を更新する文書。
+        DrawingDocument document;
+        // selection: 単独選択のUUIDを保つ選択モデル。
+        ShapeSelectionModel selection(&document);
+        // panel: マトリクスと数値欄を操作するプロパティパネル。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // id: 拡大・縮小の対象になる四角形UUID。
+        const auto id = document.addShape(QRectF(10,20,30,40));
+        QVERIFY(document.translateShapes({id},{100,200})); QVERIFY(selection.selectOnly(id));
+        // anchor: 図形を変更せず固定点だけを選ぶUI。
+        auto *anchor = panel.findChild<RectangleAnchorSelector*>(); QVERIFY(anchor);
+        // changed: 基準点をクリックするだけでは文書が変わらないことを確認する監視。
+        QSignalSpy changed(&document,&DrawingDocument::shapeChanged);
+        // button: マトリクスの位置と実際の固定点が一致することを確かめる対象ボタン。
+        auto *button = anchor->findChild<QToolButton*>(QStringLiteral("rectangleAnchor_%1").arg(anchorIndex)); QVERIFY(button);
+        QTest::mouseClick(button,Qt::LeftButton); QCOMPARE(anchor->anchorIndex(),anchorIndex);
+        QCOMPARE(anchor->normalizedAnchor(),fraction); QCOMPARE(changed.count(),0);
+        // fixed: 変更前に選択点があった、用紙中心基準の実寸座標（mm）。
+        const QPointF fixed(110+30*fraction.x(),220+40*fraction.y());
+        enter(panel,"width","60"); enter(panel,"height","80");
+        // resized: 寸法更新を反映した実寸の矩形。
+        const QRectF resized = document.shape(id)->boundsMm();
+        QCOMPARE(resized.size(),QSizeF(60,80));
+        QCOMPARE(QPointF(resized.x()+60*fraction.x(),resized.y()+80*fraction.y()),fixed);
+        QCOMPARE(field(panel,"originX")->text(),QString::number(fixed.x())+" mm");
+        QCOMPARE(field(panel,"originY")->text(),QString::number(fixed.y())+" mm");
+        QCOMPARE(editor(panel,"width")->text(),QString("60")); QCOMPARE(editor(panel,"height")->text(),QString("80"));
+        enter(panel,"width","15"); enter(panel,"height","20");
+        // shrunk: 縮小時にも同じ固定点を保つ実寸矩形。
+        const QRectF shrunk = document.shape(id)->boundsMm();
+        QCOMPARE(QPointF(shrunk.x()+15*fraction.x(),shrunk.y()+20*fraction.y()),fixed);
+        QCOMPARE(selection.selectedIds(),QList<QUuid>({id})); QCOMPARE(changed.count(),4);
+    }
+    /// @brief 固定点の初期値・排他性・保持と、円中心・真円の維持を検証する。
+    void anchorPersistenceAndCircleRadius() {
+        // document: 形状と通知を検証する文書。
+        DrawingDocument document;
+        // selection: 四角形と円を切り替えて選択するモデル。
+        ShapeSelectionModel selection(&document);
+        // panel: 固定点と半径を変更する対象パネル。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // anchor: 最後の選択を図形切り替え後にも保持するコントロール。
+        auto *anchor = panel.findChild<RectangleAnchorSelector*>(); QVERIFY(anchor);
+        QCOMPARE(anchor->anchorIndex(),4);
+        // notifications: 同じ基準点や不正番号で通知しないことを確認する監視。
+        QSignalSpy notifications(anchor,&RectangleAnchorSelector::anchorChanged);
+        QVERIFY(anchor->setAnchorIndex(4)); QVERIFY(!anchor->setAnchorIndex(-1)); QVERIFY(!anchor->setAnchorIndex(9));
+        QCOMPARE(notifications.count(),0); QVERIFY(anchor->setAnchorIndex(2)); QCOMPARE(notifications.count(),1);
+        // checked: 9点のうち押下表示が常に1点だけであることを検証するカウンタ。
+        int checked = 0;
+        // button: セレクタが所有する各固定点ボタン。
+        for (auto *button : anchor->findChildren<QToolButton*>()) checked += button->isChecked();
+        QCOMPARE(checked,1);
+        // rect: 基準点変更や未確定入力では形状が変わらない四角形UUID。
+        const auto rect = document.addShape(QRectF(0,0,30,40)); QVERIFY(selection.selectOnly(rect));
+        editor(panel,"width")->setText("99"); editor(panel,"width")->setModified(true);
+        QVERIFY(anchor->setAnchorIndex(6)); QCOMPARE(editor(panel,"width")->text(),QString("30"));
+        QCOMPARE(document.shape(rect)->boundsMm(),QRectF(0,0,30,40));
+        // circle: 中心を保ったまま半径だけを変更する円のUUID。
+        const auto circle = document.addShape(CircleGeometry{{10,20},5});
+        QVERIFY(document.translateShapes({circle},{100,200})); QVERIFY(selection.selectOnly(circle));
+        QVERIFY(!anchor->isVisible()); enter(panel,"radius","12.5");
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).centerMm,QPointF(110,220));
+        QCOMPARE(document.shape(circle)->boundsMm(),QRectF(97.5,207.5,25,25));
+        QCOMPARE(field(panel,"diameter")->text(),QString("25 mm"));
+        QVERIFY(selection.selectOnly(rect)); QCOMPARE(anchor->anchorIndex(),6);
+        panel.hide(); panel.show(); QCOMPARE(anchor->anchorIndex(),6);
+    }
+    /// @brief 不正寸法・未確定値の拒否と、未編集の精密値保持を検証する。
+    void invalidSizesAndPrecision() {
+        // document: 不正入力時に維持される確定形状。
+        DrawingDocument document;
+        // selection: 編集対象を切り替えるUUID選択モデル。
+        ShapeSelectionModel selection(&document);
+        // panel: Enter確定とEsc取消を受け付けるパネル。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // rect: 表示桁より精密な幅を持つ四角形。
+        const auto rect = document.addShape(QRectF(0,0,30.123456789,40)); QVERIFY(selection.selectOnly(rect));
+        QTest::keyClick(editor(panel,"width"),Qt::Key_Return);
+        QCOMPARE(std::get<QRectF>(document.shape(rect)->geometryMm).width(),30.123456789);
+        enter(panel,"height","80");
+        QCOMPARE(std::get<QRectF>(document.shape(rect)->geometryMm).width(),30.123456789);
+        // valid: 不正入力の前に確定した実寸範囲。
+        const QRectF valid = document.shape(rect)->boundsMm();
+        // changed: 拒否した入力で通知が発生しないことを確かめる監視。
+        QSignalSpy changed(&document,&DrawingDocument::shapeChanged);
+        enter(panel,"width","0"); QCOMPARE(changed.count(),0);
+        QTest::keyClick(editor(panel,"width"),Qt::Key_Escape);
+        // bad: 表記・符号・範囲の検証に使う寸法入力（mm）。
+        for (const QString bad : {QString("-1"),QString("NaN"),QString("100000000")}) {
+            editor(panel,"height")->setText(bad); editor(panel,"height")->setModified(true);
+            QTest::keyClick(editor(panel,"height"),Qt::Key_Return); QCOMPARE(changed.count(),0);
+        }
+        QCOMPARE(document.shape(rect)->boundsMm(),valid);
+        // circle: 不正半径が元の真円を変更しないことを確認する対象。
+        const auto circle = document.addShape(CircleGeometry{{10,20},5.123456789}); QVERIFY(selection.selectOnly(circle));
+        QTest::keyClick(editor(panel,"radius"),Qt::Key_Return);
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).radiusMm,5.123456789);
+        enter(panel,"radius","0"); QCOMPARE(changed.count(),0);
+        editor(panel,"radius")->setText("100000000"); editor(panel,"radius")->setModified(true);
+        QTest::keyClick(editor(panel,"radius"),Qt::Key_Return); QCOMPARE(changed.count(),0);
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).radiusMm,5.123456789);
+        QVERIFY(!panel.findChild<QLabel*>("lineEditError")->text().isEmpty());
+        QTest::keyClick(editor(panel,"radius"),Qt::Key_Escape);
+        editor(panel,"radius")->setText("99"); editor(panel,"radius")->setModified(true);
+        panel.setEnabled(false); panel.setEnabled(true); QCOMPARE(changed.count(),0);
+        QCOMPARE(editor(panel,"radius")->text(),QString("5.123457"));
+    }
     /// @brief 6項目の入力が実寸に反映され、長さ・角度では始点を固定することを検証する。
     void lineEditingKeepsFirstPoint() {
         // document: 移動済みの直線も編集できることを確認する文書。
@@ -163,6 +292,7 @@ private slots:
         QCOMPARE(editor(panel,"endY")->text(), QString("-140"));
         QCOMPARE(editor(panel,"length")->text(), QString("50"));
         QCOMPARE(editor(panel,"angle")->text(), QString("53.130102"));
+        QVERIFY(panel.findChild<RectangleAnchorSelector*>()->setAnchorIndex(6));
         QVERIFY(selection.selectOnly(rect));
         QCOMPARE(field(panel,"originX")->text(), QString("-90 mm"));
         QCOMPARE(field(panel,"originY")->text(), QString("30 mm"));

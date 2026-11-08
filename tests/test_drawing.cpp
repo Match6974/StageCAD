@@ -11,6 +11,8 @@
 #include "toolpalette.h"
 #include "pdfplacement.h"
 #include "objectinfopanel.h"
+#include "rectangleanchorselector.h"
+#include <QGraphicsRectItem>
 #include <QDockWidget>
 #include <QAction>
 #include <QContextMenuEvent>
@@ -82,6 +84,54 @@ private slots:
         QVERIFY(view->setDisplayZoom(2)); QCOMPARE(item->line(),QLineF(-20,-15,-20,105));
         view->resetView();
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-line-editing.png"));
+    }
+    /// @brief 9点固定での寸法変更と円の半径変更が、選択を保って図面へ反映されることを検証する。
+    void dimensionPropertiesUpdateCanvas() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        // startup: 起動時のPDF選択を閉じる自動応答タイマー。
+        QTimer startup;
+        // コールバック: 図形編集だけを検証するため、起動時のPDF選択を取り消す。
+        connect(&startup,&QTimer::timeout,[] {
+            // widget: Qtが所有する、起動中のトップレベル画面。
+            for (auto *widget : QApplication::topLevelWidgets())
+                // dialog: 表示中の場合だけ閉じるファイル選択画面。
+                if (auto *dialog = qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+        });
+        startup.start(20);
+        // window: 編集パネルと図面を統合して検証するメイン画面。
+        MainWindow window; startup.stop(); window.show(); QTest::qWait(10);
+        // view: 図形文書と表示アイテムを所有するCADビュー。
+        auto *view = window.findChild<DrawingView*>();
+        // info: 入力欄と固定点選択を所有する情報パネル。
+        auto *info = window.findChild<ObjectInfoPanel*>(); QVERIFY(view && info);
+        // rectangle: 移動済みの矩形のUUID。右上(40,30)を固定して伸縮する。
+        const auto rectangle = view->document()->addShape(QRectF(-30,-20,60,40));
+        QVERIFY(view->document()->translateShapes({rectangle},{10,10}));
+        QVERIFY(view->selectionModel()->selectOnly(rectangle));
+        QVERIFY(info->findChild<RectangleAnchorSelector*>()->setAnchorIndex(2));
+        // width: Enterで幅だけを確定する入力欄。
+        auto *width = info->findChild<QLineEdit*>("edit_width");
+        width->setFocus(); width->selectAll(); QTest::keyClicks(width,"100"); QTest::keyClick(width,Qt::Key_Return);
+        // height: 幅の変更後も同じ右上を固定する高さ入力欄。
+        auto *height = info->findChild<QLineEdit*>("edit_height");
+        height->setFocus(); height->selectAll(); QTest::keyClicks(height,"80"); QTest::keyClick(height,Qt::Key_Return);
+        // rectItem: 同じUUIDを描画し続ける、シーン所有の矩形アイテム。
+        auto *rectItem = qgraphicsitem_cast<QGraphicsRectItem*>(view->shapeItems().first()); QVERIFY(rectItem);
+        QCOMPARE(rectItem->rect(),QRectF(-60,-50,100,80)); QCOMPARE(rectItem->pos(),QPointF());
+        QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-rectangle-anchor.png"));
+        // circle: 中心(70,30)を保持して半径を編集する、移動済みの円のUUID。
+        const auto circle = view->document()->addShape(CircleGeometry{{60,20},10});
+        QVERIFY(view->document()->translateShapes({circle},{10,10})); QVERIFY(view->selectionModel()->selectOnly(circle));
+        // radius: 真円のまま拡大する半径入力欄。
+        auto *radius = info->findChild<QLineEdit*>("edit_radius");
+        radius->setFocus(); radius->selectAll(); QTest::keyClicks(radius,"25"); QTest::keyClick(radius,Qt::Key_Return);
+        // ellipseItem: モデルの円を表示する、シーン所有の楕円アイテム。
+        auto *ellipseItem = qgraphicsitem_cast<QGraphicsEllipseItem*>(view->shapeItems().last()); QVERIFY(ellipseItem);
+        QCOMPARE(ellipseItem->rect(),QRectF(45,5,50,50)); QCOMPARE(ellipseItem->pos(),QPointF());
+        QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({circle}));
+        QCOMPARE(rectItem->rect(),QRectF(-60,-50,100,80));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-circle-radius.png"));
     }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {

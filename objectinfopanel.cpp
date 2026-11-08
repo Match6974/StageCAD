@@ -5,6 +5,8 @@
 #include "objectinfopanel.h"
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
+#include "rectangleanchorselector.h"
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QGroupBox>
 #include <QFormLayout>
@@ -50,7 +52,7 @@ QString number(double value)
 QString millimeters(double value) { return number(value) + QStringLiteral(" mm"); }
 }
 
-/// @brief 形状表示と直線の編集欄を作り、モデルの選択・形状・寿命の変更に接続する。
+/// @brief 形状表示と直線・四角形・円の編集欄を作り、モデルの選択・形状・寿命の変更に接続する。
 /// @param document 参照先の図形文書。パネルは所有しない。
 /// @param selection 参照先の選択モデル。パネルは所有しない。
 /// @param parent このパネルを所有するQtの親。
@@ -71,6 +73,10 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
     auto *contentLayout = new QVBoxLayout(content);
     m_shapeGroup = new QGroupBox(tr("形状"), content);
     m_form = new QFormLayout(m_shapeGroup); m_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    m_anchorSelector = new RectangleAnchorSelector(m_shapeGroup);
+    m_anchorLabel = new QLabel(m_shapeGroup); m_form->addRow(m_anchorLabel,m_anchorSelector);
+    // コールバック: 固定点の変更だけでは図形を変えず、未確定入力と座標表示を更新する。
+    connect(m_anchorSelector,&RectangleAnchorSelector::anchorChanged,this,&ObjectInfoPanel::refresh);
     addField("originX", tr("左下 X")); addField("originY", tr("左下 Y"));
     addField("width", tr("幅")); addField("height", tr("高さ"));
     addField("centerX", tr("中心 X")); addField("centerY", tr("中心 Y"));
@@ -81,7 +87,7 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
     addLineEditor("startX", tr("始点 X (mm)")); addLineEditor("startY", tr("始点 Y (mm)"));
     addLineEditor("endX", tr("終点 X (mm)")); addLineEditor("endY", tr("終点 Y (mm)"));
     addLineEditor("length", tr("長さ (mm)")); addLineEditor("angle", tr("角度 (°)"));
-    m_lineEdits.value("angle")->setToolTip(tr("+X方向を0°とした反時計回りの角度。始点を固定して変更します。"));
+    m_edits.value("angle")->setToolTip(tr("+X方向を0°とした反時計回りの角度。始点を固定して変更します。"));
     contentLayout->addWidget(m_lineGroup);
     // hint: 各入力の確定・取消と、固定点を説明する直線グループ所有のラベル。
     auto *hint = new QLabel(tr("各項目はEnterで確定、Escで取消。\n長さ・角度の変更では始点を固定します。"), m_lineGroup);
@@ -89,7 +95,7 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
     m_error = new QLabel(content); m_error->setObjectName("lineEditError"); m_error->setWordWrap(true);
     contentLayout->addWidget(m_error);
     // units: 表示単位と座標原点を説明する、コンテナ所有のラベル。
-    auto *units = new QLabel(tr("座標・長さは実寸mmです。\n原点は用紙中心、右が+X、上が+Yです。"), content);
+    auto *units = new QLabel(tr("数値入力はEnterで確定、Escで取消。\n座標・長さは実寸mmです。\n原点は用紙中心、右が+X、上が+Yです。"), content);
     units->setWordWrap(true); contentLayout->addWidget(units); contentLayout->addStretch();
     scroll->setWidget(content); layout->addWidget(scroll);
     if (selection) {
@@ -118,10 +124,19 @@ ObjectInfoPanel::~ObjectInfoPanel()
 /// @param title 項目の表示名。
 void ObjectInfoPanel::addField(const QString &key, const QString &title)
 {
-    // value: グループが所有する、読み取り専用で文字列を選択できる値ラベル。
-    auto *value = new QLabel(m_shapeGroup); value->setObjectName("property_" + key);
+    // row: 読み取りラベルと数値入力を切り替える、形状グループ所有のコンテナ。
+    auto *row = new QWidget(m_shapeGroup);
+    // layout: 行内の余白を設けず、現在のモードに合う表示要素を並べるレイアウト。
+    auto *layout = new QHBoxLayout(row); layout->setContentsMargins(0,0,0,0);
+    // value: 値をコピーできる、行コンテナ所有の読み取りラベル。
+    auto *value = new QLabel(row); value->setObjectName("property_" + key);
     value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    value->setWordWrap(true); m_form->addRow(title, value); m_values.insert(key, value);
+    value->setWordWrap(true); layout->addWidget(value);
+    if (key == "width" || key == "height" || key == "radius") {
+        // edit: 四角形の幅・高さ、または円の半径でだけ表示する入力欄。
+        auto *edit = createEditor(key,row); edit->hide(); layout->addWidget(edit);
+    }
+    m_form->addRow(title,row); m_values.insert(key,value); m_fieldRows.insert(key,row);
 }
 
 /// @brief 指定項目の表示文字列を設定し、その行を見える状態にする。
@@ -130,21 +145,37 @@ void ObjectInfoPanel::addField(const QString &key, const QString &title)
 void ObjectInfoPanel::showField(const QString &key, const QString &value)
 {
     // label: グループが所有する、表示対象の値ラベル。
-    auto *label = m_values.value(key); label->setText(value); m_form->setRowVisible(label, true);
+    auto *label = m_values.value(key); label->setText(value); label->show();
+    if (m_edits.contains(key)) m_edits.value(key)->hide();
+    m_form->setRowVisible(m_fieldRows.value(key), true);
 }
 
 /// @brief 現在の選択図形を読み取り、該当する実寸項目だけを表示する。
 void ObjectInfoPanel::refresh()
 {
     // value: 以前の図形から値が残らないよう消去する、グループ所有のラベル。
-    for (auto *value : m_values) { value->clear(); m_form->setRowVisible(value, false); }
-    m_error->clear(); m_lineId = {};
-    // edit: 以前の線の下書きを破棄する、直線グループ所有の入力欄。
-    for (auto *edit : m_lineEdits) { edit->clear(); edit->setModified(false); }
+    for (auto *value : m_values) value->clear();
+    // row: 前の図形にだけ必要だった項目を隠す、形状グループ所有のコンテナ。
+    for (auto *row : m_fieldRows) m_form->setRowVisible(row,false);
+    m_error->clear(); m_editId = {};
+    // edit: 以前の図形の下書きを破棄する、パネル内コンテナ所有の入力欄。
+    for (auto *edit : m_edits) { edit->clear(); edit->setModified(false); }
     // single: 単独選択時に取得する値データ。表示のためにモデルを変更しない。
     const auto single = m_document && m_selection ? m_selection->singleShape() : std::nullopt;
-    // isLine: 単独選択した直線には数値編集を、それ以外の形状には情報表示を使う。
+    // isLine: 単独選択した直線では、専用の端点・長さ・角度のフォームを使う。
     const bool isLine = single && single->kind() == ShapeKind::Line;
+    // isRectangle: 四角形だけで9点の固定位置選択を表示する。
+    const bool isRectangle = single && single->kind() == ShapeKind::Rectangle;
+    m_form->setRowVisible(m_anchorSelector,isRectangle);
+    m_anchorLabel->setText(tr("固定点: %1").arg(m_anchorSelector->anchorName()));
+    // axis: 四角形では基準点、それ以外では左下として座標の意味を明示する行名。
+    for (const QString axis : {QStringLiteral("X"),QStringLiteral("Y")}) {
+        // key: 基準点・外接範囲の座標を表示する項目名。
+        const QString key = "origin" + axis;
+        // label: フォームが生成・所有する、座標の項目名ラベル。
+        auto *label = qobject_cast<QLabel*>(m_form->labelForField(m_fieldRows.value(key)));
+        label->setText(isRectangle ? tr("基準点 %1").arg(axis) : tr("左下 %1").arg(axis));
+    }
     m_shapeGroup->setVisible(single.has_value() && !isLine); m_lineGroup->setVisible(isLine);
     if (!single) {
         // count: 有効な選択図形数。文書がない場合は未選択として扱う。
@@ -153,6 +184,7 @@ void ObjectInfoPanel::refresh()
                                     : tr("図形を選択すると形状情報を表示します。"));
         return;
     }
+    m_editId = single->id;
     // offset: 図形の形状全体に加える配置移動量（実寸mm）。
     const QPointF offset = single->positionMm;
     switch (single->kind()) {
@@ -160,22 +192,15 @@ void ObjectInfoPanel::refresh()
         m_summary->setText(tr("直線"));
         // line: 2端点のローカル実寸形状。配置移動量は別に加える。
         const auto line = std::get<QLineF>(single->geometryMm);
-        m_lineId = single->id;
+        m_editId = single->id;
         // world: 配置移動量を反映した、用紙中心基準の実寸端点（mm）。
         const QLineF world = line.translated(offset);
         // values: 直線6項目の表示値。角度だけ度、それ以外は実寸mm。
         const QHash<QString,double> values{{"startX",world.x1()},{"startY",world.y1()},
             {"endX",world.x2()},{"endY",world.y2()},{"length",world.length()},{"angle",lineAngle(world)}};
-        // it: 数値を対応する入力欄へ反映する項目走査。
-        for (auto it = values.cbegin(); it != values.cend(); ++it) {
-            // edit: 対象項目の入力欄。プログラム反映で変更済み状態にはしない。
-            auto *edit = m_lineEdits.value(it.key());
-            // locale: 表示値と一致させる、桁区切りを拒否する入力ロケール。
-            QLocale locale; locale.setNumberOptions(QLocale::RejectGroupSeparator | QLocale::OmitGroupSeparator);
-            edit->findChild<QDoubleValidator*>()->setLocale(locale);
-            edit->setText(number(it.key() == "angle" && number(it.value()) == number(360) ? 0 : it.value()));
-            edit->setModified(false);
-        }
+        // it: 最新の実寸値を、対応する数値入力へ反映する項目走査。
+        for (auto it = values.cbegin(); it != values.cend(); ++it)
+            showEditor(it.key(),it.key() == "angle" && number(it.value()) == number(360) ? 0 : it.value());
         break;
     }
     case ShapeKind::Circle: {
@@ -184,7 +209,8 @@ void ObjectInfoPanel::refresh()
         const auto circle = std::get<CircleGeometry>(single->geometryMm);
         showField("centerX", millimeters(circle.centerMm.x() + offset.x()));
         showField("centerY", millimeters(circle.centerMm.y() + offset.y()));
-        showField("radius", millimeters(circle.radiusMm)); showField("diameter", millimeters(2 * circle.radiusMm));
+        showField("radius", millimeters(circle.radiusMm)); showEditor("radius",circle.radiusMm);
+        showField("diameter", millimeters(2 * circle.radiusMm));
         break;
     }
     case ShapeKind::Rectangle:
@@ -194,8 +220,15 @@ void ObjectInfoPanel::refresh()
         m_summary->setText(single->kind() == ShapeKind::Rectangle ? tr("四角") : tr("多角形"));
         showField("originX", millimeters(bounds.left())); showField("originY", millimeters(bounds.top()));
         showField("width", millimeters(bounds.width())); showField("height", millimeters(bounds.height()));
-        if (single->kind() == ShapeKind::Polygon)
+        if (single->kind() == ShapeKind::Polygon) {
             showField("vertices", QString::number(std::get<QPolygonF>(single->geometryMm).size()));
+        } else {
+            // fraction: 左下(0,0)〜右上(1,1)で表す、選択中の固定点（無次元）。
+            const QPointF fraction = m_anchorSelector->normalizedAnchor();
+            showField("originX",millimeters(bounds.x()+bounds.width()*fraction.x()));
+            showField("originY",millimeters(bounds.y()+bounds.height()*fraction.y()));
+            showEditor("width",bounds.width()); showEditor("height",bounds.height());
+        }
         break;
     }
     }
@@ -206,15 +239,42 @@ void ObjectInfoPanel::refresh()
 /// @param title 単位を含む項目名。
 void ObjectInfoPanel::addLineEditor(const QString &key, const QString &title)
 {
-    // edit: 直線グループが所有する、1項目の下書き入力欄。
-    auto *edit = new QLineEdit(m_lineGroup); edit->setObjectName("edit_" + key);
-    // bound: 座標以外も有限の数値として検証するための上限。
+    m_lineForm->addRow(title,createEditor(key,m_lineGroup));
+}
+
+/// @brief 共有する入力形式とキーボード操作を持つ数値欄を作成する。
+/// @param key 直線座標・角度・寸法を区別する項目名。
+/// @param parent 入力欄を所有するグループまたは行コンテナ。
+QLineEdit *ObjectInfoPanel::createEditor(const QString &key, QWidget *parent)
+{
+    // edit: 呼び出し元のコンテナが所有する数値入力欄。
+    auto *edit = new QLineEdit(parent); edit->setObjectName("edit_"+key);
+    // bound: 角度・寸法も有限のdoubleとして入力できる最大値。
     const double bound = std::numeric_limits<double>::max();
-    // validator: 小数6桁・通常表記で入力を検証する、入力欄所有のバリデータ。
-    auto *validator = new QDoubleValidator(key == "length" ? 0 : -bound, bound, DisplayPrecision, edit);
-    if (key != "length" && key != "angle") validator->setRange(-ShapeData::CoordinateLimitMm, ShapeData::CoordinateLimitMm, DisplayPrecision);
+    // dimension: 正の値だけを確定できる長さ・幅・高さ・半径の項目かどうか。
+    const bool dimension = key == "length" || key == "width" || key == "height" || key == "radius";
+    // validator: 表示桁と揃えた通常表記を受け付ける、入力欄所有の検証器。
+    auto *validator = new QDoubleValidator(dimension ? 0 : -bound,bound,DisplayPrecision,edit);
+    if (!dimension && key != "angle") validator->setRange(-ShapeData::CoordinateLimitMm,ShapeData::CoordinateLimitMm,DisplayPrecision);
     validator->setNotation(QDoubleValidator::StandardNotation); edit->setValidator(validator);
-    edit->installEventFilter(this); m_lineForm->addRow(title, edit); m_lineEdits.insert(key,edit);
+    edit->installEventFilter(this); m_edits.insert(key,edit);
+    return edit;
+}
+
+/// @brief 表示用の丸め値を入力へ反映し、ユーザーが変更するまで未編集として保持する。
+/// @param key 表示する編集項目の内部名。
+/// @param value 現在の実寸mmまたは角度（度）。
+void ObjectInfoPanel::showEditor(const QString &key, double value)
+{
+    // edit: 最新の数値を表示する、形状グループまたは行コンテナ所有の入力欄。
+    auto *edit = m_edits.value(key);
+    // locale: 小数点記号はOSに合わせ、桁区切りは拒否する入力ロケール。
+    QLocale locale; locale.setNumberOptions(QLocale::RejectGroupSeparator | QLocale::OmitGroupSeparator);
+    edit->findChild<QDoubleValidator*>()->setLocale(locale);
+    edit->setText(number(value)); edit->setModified(false); edit->show();
+    if (m_values.contains(key)) {
+        m_values.value(key)->hide(); m_form->setRowVisible(m_fieldRows.value(key),true);
+    }
 }
 
 /// @brief 入力欄のEnterで1項目を確定し、Escでは未確定入力だけを戻す。
@@ -223,13 +283,13 @@ void ObjectInfoPanel::addLineEditor(const QString &key, const QString &title)
 bool ObjectInfoPanel::eventFilter(QObject *watched, QEvent *event)
 {
     // key: このパネルが管理する入力欄かを識別する項目名。
-    const QString key = m_lineEdits.key(qobject_cast<QLineEdit*>(watched));
+    const QString key = m_edits.key(qobject_cast<QLineEdit*>(watched));
     if (!key.isEmpty() && event->type() == QEvent::KeyPress && isEnabled()) {
         // press: Enter・Escを判定する、Qt所有のキーイベント。
         auto *press = static_cast<QKeyEvent*>(event);
         if (press->key() == Qt::Key_Escape) { refresh(); event->accept(); return true; }
         if (press->key() == Qt::Key_Return || press->key() == Qt::Key_Enter) {
-            commitLineField(key); event->accept(); return true;
+            commitField(key); event->accept(); return true;
         }
     }
     return QWidget::eventFilter(watched,event);
@@ -243,16 +303,16 @@ void ObjectInfoPanel::changeEvent(QEvent *event)
     QWidget::changeEvent(event);
 }
 
-/// @brief 1つの入力だけを最新の直線へ反映し、不正値では入力とモデルを保持する。
-/// @param key 確定する項目名。長さ・角度は始点を固定して終点を動かす。
-void ObjectInfoPanel::commitLineField(const QString &key)
+/// @brief 1項目を最新の単独選択図形へ反映する。不正値では入力とモデルを保持する。
+/// @param key 確定する項目名。直線は始点、四角形は選択点、円は中心を固定する。
+void ObjectInfoPanel::commitField(const QString &key)
 {
     if (!isEnabled() || !m_document || !m_selection) return;
     // single: Enter時点の単独選択を再取得し、別図形へ古い入力が適用されるのを防ぐ。
     const auto single = m_selection->singleShape();
-    if (!single || single->id != m_lineId || single->kind() != ShapeKind::Line) { refresh(); return; }
+    if (!single || single->id != m_editId || single->kind() == ShapeKind::Polygon) { refresh(); return; }
     // edit: 今回確定する1項目の入力欄。
-    auto *edit = m_lineEdits.value(key);
+    auto *edit = m_edits.value(key);
     if (!edit || !edit->isModified()) return;
     // valid: 入力表記と有限値の変換がどちらも成立したかどうか。
     bool valid = false;
@@ -260,6 +320,30 @@ void ObjectInfoPanel::commitLineField(const QString &key)
     const double value = edit->findChild<QDoubleValidator*>()->locale().toDouble(edit->text(), &valid);
     if (!valid || !std::isfinite(value) || !edit->hasAcceptableInput()) {
         m_error->setText(tr("入力値が範囲外、または数値として不正です。小数点以下6桁までで指定してください。")); return;
+    }
+    if (single->kind() == ShapeKind::Rectangle || single->kind() == ShapeKind::Circle) {
+        if (value <= 0) { m_error->setText(tr("幅・高さ・半径は0より大きい値を指定してください。")); return; }
+        // applied: 対象種類に対応する寸法変更が検証・確定されたかどうか。
+        bool applied = false;
+        if (single->kind() == ShapeKind::Rectangle && (key == "width" || key == "height")) {
+            // current: 配置移動量を含めた、変更前の実寸矩形（mm）。
+            const QRectF current = std::get<QRectF>(single->geometryMm).translated(single->positionMm);
+            // size: 未編集の寸法を精密値のまま保持する更新候補（実寸mm）。
+            QSizeF size = current.size();
+            if (key == "width") size.setWidth(value); else size.setHeight(value);
+            // fraction: 上下をCAD座標へ対応付けた固定点の相対位置（無次元）。
+            const QPointF fraction = m_anchorSelector->normalizedAnchor();
+            // origin: 固定点が動かないように、サイズ差に応じて移す左下座標（実寸mm）。
+            const QPointF origin = current.topLeft() + QPointF((current.width()-size.width())*fraction.x(),
+                                                               (current.height()-size.height())*fraction.y());
+            applied = m_document->setRectangleBounds(single->id,QRectF(origin,size));
+        } else if (single->kind() == ShapeKind::Circle && key == "radius") {
+            applied = m_document->setCircleRadius(single->id,value);
+        }
+        if (!applied) {
+            m_error->setText(tr("変更後の図形が座標範囲（±10000000mm）を超えるため適用できません。")); return;
+        }
+        refresh(); return;
     }
     // line: 現在の確定済み形状を実寸の端点へ変換した更新候補。
     QLineF line = std::get<QLineF>(single->geometryMm).translated(single->positionMm);

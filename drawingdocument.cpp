@@ -116,3 +116,52 @@ bool DrawingDocument::setLineEndpoints(const QUuid &id, const QLineF &lineMm)
     emit shapeChanged(next.id);
     return true;
 }
+
+/// @brief 幅・高さが正の実寸矩形を検証して置き換える。無変更・不正値では通知しない。
+/// @param id 変更する四角形UUID。
+/// @param boundsMm 呼び出し側が基準位置を計算済みの矩形（実寸mm）。
+bool DrawingDocument::setRectangleBounds(const QUuid &id, const QRectF &boundsMm)
+{
+    if (m_mutating) return false;
+    // original: 種類と現在の配置を確認する、変更前の図形データのコピー。
+    const auto original = shape(id);
+    if (!original || original->kind() != ShapeKind::Rectangle) return false;
+    // next: 配置を実寸形状へ統合して検証する候補。通知中もUUIDを固定して保持する。
+    const ShapeData next{id, boundsMm, {}};
+    if (!next.isValid()) return false;
+    // current: 配置移動量を反映した変更前の矩形（実寸mm）。
+    const QRectF current = std::get<QRectF>(original->geometryMm).translated(original->positionMm);
+    if (current.x() == boundsMm.x() && current.y() == boundsMm.y()
+        && current.width() == boundsMm.width() && current.height() == boundsMm.height()) return true;
+    // mutating: 変更開始から通知終了まで文書更新の再入を拒否するガード。
+    QScopedValueRollback<bool> mutating(m_mutating, true);
+    emit aboutToChange();
+    // data: 対象UUIDだけを同じ描画順で更新する、文書内の図形データ。
+    for (auto &data : m_shapes) if (data.id == next.id) { data = next; break; }
+    emit shapeChanged(next.id);
+    return true;
+}
+
+/// @brief 中心の実寸座標を変えずに、有限の正半径で円を更新する。
+/// @param id 対象の円UUID。
+/// @param radiusMm 新しい半径（実寸mm）。外接範囲が描画可能な座標内にあることも検証する。
+bool DrawingDocument::setCircleRadius(const QUuid &id, double radiusMm)
+{
+    if (m_mutating) return false;
+    // original: 種類・中心・現在の半径を確認する、変更前の図形データのコピー。
+    const auto original = shape(id);
+    if (!original || original->kind() != ShapeKind::Circle) return false;
+    // circle: 現在のローカル中心・半径。配置移動量は中心へ加えて正本を更新する。
+    const auto circle = std::get<CircleGeometry>(original->geometryMm);
+    // next: 中心の実寸座標を保持した候補。配置移動量は0へ統合する。
+    const ShapeData next{id, CircleGeometry{circle.centerMm + original->positionMm, radiusMm}, {}};
+    if (!next.isValid()) return false;
+    if (circle.radiusMm == radiusMm) return true;
+    // mutating: 通知中の文書変更を防ぎ、一貫した形状だけを公開するガード。
+    QScopedValueRollback<bool> mutating(m_mutating, true);
+    emit aboutToChange();
+    // data: 真円の種類とUUIDを維持したまま更新する文書内の図形。
+    for (auto &data : m_shapes) if (data.id == next.id) { data = next; break; }
+    emit shapeChanged(next.id);
+    return true;
+}
