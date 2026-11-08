@@ -4,6 +4,7 @@
  */
 
 #include "drawingdocument.h"
+#include "drawingsettings.h"
 #include <QScopedValueRollback>
 #include <QSet>
 #include <QHash>
@@ -166,6 +167,8 @@ public:
         emit m_document->aboutToChange();
         if (m_before) replace(*m_before);
         else {
+            // 履歴外で変更した縮尺なども、レイヤー自体を復元するときには失わない。
+            if (const auto current = m_document->layer(m_after.id)) m_after = *current;
             m_document->m_layers.erase(std::remove_if(m_document->m_layers.begin(),m_document->m_layers.end(),
                 // data: 追加を取り消す対象のレイヤー。
                 [this](const DrawingLayer &data) { return data.id == m_after.id; }),m_document->m_layers.end());
@@ -178,7 +181,7 @@ public:
     void redo() override {
         emit m_document->aboutToChange();
         if (m_before) replace(m_after);
-        else { m_document->m_layers.append(m_after); m_document->m_activeLayerId = m_after.id; }
+        else { m_after.visibility = LayerVisibility::Visible; m_document->m_layers.append(m_after); m_document->m_activeLayerId = m_after.id; }
         emit m_document->layersChanged();
     }
 private:
@@ -260,7 +263,7 @@ bool DrawingDocument::canEditShape(const QUuid &id) const {
     const auto data = shape(id);
     // owner: 対象図形が所属するレイヤーのコピー。
     const auto owner = data ? layer(data->layerId) : std::nullopt;
-    return owner && owner->visibility == LayerVisibility::Visible;
+    return owner && effectiveLayerVisibility(owner->id) == LayerVisibility::Visible;
 }
 /// @brief レイヤーをアクティブにし、非表示・グレイなら通常表示へ戻す。
 /// @param id 対象レイヤーUUID。存在しなければ変更しない。
@@ -289,6 +292,29 @@ bool DrawingDocument::setLayerVisibility(const QUuid &id,LayerVisibility visibil
     // data: 表示状態だけを変更する対象。
     for (auto &data : m_layers) if (data.id == target->id) data.visibility = visibility;
     emit layersChanged(); return true;
+}
+
+/// @brief 他のレイヤーや図形寸法を変えずに縮尺を確定する。表示操作なのでRedoを保持する。
+/// @param id 変更対象レイヤーのUUID。
+/// @param denominator 新しい縮尺1:Nの分母。
+bool DrawingDocument::setLayerScale(const QUuid &id,double denominator) {
+    // target: 存在・変更前の縮尺を確認する値コピー。
+    const auto target = layer(id);
+    if (m_mutating || !target || !DrawingSettings::isValidScale(denominator)) return false;
+    if (target->scaleDenominator == denominator) return true;
+    // guard: 変更中の描画・履歴操作の割り込みを防ぐガード。
+    QScopedValueRollback<bool> guard(m_mutating,true); emit aboutToChange();
+    // data: 対象の換算倍率だけを更新するレイヤー。
+    for (auto &data : m_layers) if (data.id == target->id) data.scaleDenominator = denominator;
+    emit layersChanged(); return true;
+}
+/// @brief 縮尺が一致する場合だけ手動の表示状態を使い、不一致の場合は一時的に隠す。
+/// @param id 表示状態を調べるレイヤーUUID。
+LayerVisibility DrawingDocument::effectiveLayerVisibility(const QUuid &id) const {
+    // target: 表示対象レイヤー。active: 表示換算の基準となるレイヤー。
+    const auto target = layer(id), active = layer(m_activeLayerId);
+    if (!target || !active || target->scaleDenominator != active->scaleDenominator) return LayerVisibility::Hidden;
+    return target->visibility;
 }
 
 /// @brief 文書内で共通に使うQt標準の履歴スタックを作る。

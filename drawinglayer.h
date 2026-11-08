@@ -22,5 +22,7 @@ struct DrawingLayer {
     QString name;
     // visibility: このレイヤーの通常・非表示・グレイの指定。
     LayerVisibility visibility = LayerVisibility::Visible;
+    // scaleDenominator: 実寸mmを用紙mmへ換算する縮尺1:Nの分母。初期値は1:1。
+    double scaleDenominator = 1.0;
 };
 #endif

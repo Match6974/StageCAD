@@ -16,6 +16,7 @@
 #include <QPixmap>
 #include <QIcon>
 #include <QStyle>
+#include <QMessageBox>
 
 namespace {
 /// @brief 目・バツ・灰色の目を描き、表示状態を色以外の形でも区別する。
@@ -38,7 +39,7 @@ QIcon visibilityIcon(LayerVisibility visibility) {
 
 /// @brief 一覧のセル操作をUUIDで文書へ渡し、文書から更新された値だけを表示する。
 /// @param document 操作する文書。所有権は取得しない。
-/// @param settings 現在の縮尺表示の参照先。
+/// @param settings 作業領域の縮尺変更を通知する表示設定。
 /// @param parent パネルの所有者。
 NavigationPanel::NavigationPanel(DrawingDocument *document,DrawingSettings *settings,QWidget *parent)
     : QWidget(parent),m_document(document),m_settings(settings)
@@ -58,6 +59,13 @@ NavigationPanel::NavigationPanel(DrawingDocument *document,DrawingSettings *sett
     layout->addWidget(m_list);
     // add: 自動採番して作成先も切り替える、パネル所有のボタン。
     auto *add = new QPushButton(tr("レイヤーを追加"),this); add->setObjectName("addLayerButton"); layout->addWidget(add);
+    // help: 縮尺の不一致による非表示を説明する、パネル所有の案内リンク。
+    auto *help = new QLabel(tr("<a href='scale-help'>縮尺の異なるレイヤーが表示されない理由</a>"),this);
+    help->setObjectName("layerScaleHelp"); help->setWordWrap(true); layout->addWidget(help);
+    // コールバック: 外部ページへ移動せず、実際の表示ルールと再表示方法を説明する。
+    connect(help,&QLabel::linkActivated,this,[this] {
+        QMessageBox::information(this,tr("レイヤーの縮尺と表示"),tr("アクティブレイヤーと縮尺が異なるレイヤーは一時的に非表示になり、選択・編集できません。\n縮尺欄は各レイヤーの設定値です。表示バーの「縮尺」でアクティブレイヤーだけを変更できます。\n表示したいレイヤーをアクティブにするか、縮尺を揃えると再表示されます。手動の非表示・グレイ設定は保持されます。"));
+    });
     m_error = new QLabel(this); m_error->setObjectName("layerError"); m_error->setWordWrap(true); layout->addWidget(m_error);
     // コールバック: 文書が有効な場合だけレイヤーを追加する。
     connect(add,&QPushButton::clicked,this,[this] { if (m_document && isEnabled()) m_document->addLayer(); });
@@ -123,16 +131,26 @@ void NavigationPanel::refresh()
             item = new QTreeWidgetItem; item->setData(0,Qt::UserRole,layer.id); item->setFlags(item->flags()|Qt::ItemIsEditable);
             m_list->insertTopLevelItem(row,item);
         }
-        item->setIcon(0,visibilityIcon(layer.visibility));
+        // effective: 手動指定と縮尺一致を合わせた、実際の表示状態。
+        const auto effective = m_document->effectiveLayerVisibility(layer.id);
+        item->setIcon(0,visibilityIcon(effective));
         // state: アイコン以外でも現在値が分かる表示・アクセシビリティ用の状態名。
-        const QString state = layer.visibility == LayerVisibility::Visible ? tr("通常表示")
-            : layer.visibility == LayerVisibility::Hidden ? tr("非表示") : tr("グレイ表示");
+        const QString state = effective == LayerVisibility::Visible ? tr("通常表示")
+            : effective == LayerVisibility::Hidden ? tr("非表示") : tr("グレイ表示");
         item->setToolTip(0,tr("現在: %1。クリックで通常表示 → 非表示 → グレイ表示を切り替えます。").arg(state));
-        item->setData(0,Qt::AccessibleTextRole,state);
+        // mismatch: 表示設定自体を変えずに非表示になる、縮尺の不一致。
+        const bool mismatch = layer.scaleDenominator != m_document->layer(m_document->activeLayerId())->scaleDenominator;
+        if (mismatch) {
+            // configured: 縮尺が一致したときに戻る、ユーザー指定の表示状態。
+            const QString configured = layer.visibility == LayerVisibility::Visible ? tr("通常表示")
+                : layer.visibility == LayerVisibility::Hidden ? tr("非表示") : tr("グレイ表示");
+            item->setToolTip(0,tr("表示設定: %1。縮尺がアクティブレイヤーと異なるため一時的に非表示です。クリックでは設定だけが切り替わります。縮尺を揃えるか、このレイヤーを作成先にしてください。").arg(configured));
+        }
+        item->setData(0,Qt::AccessibleTextRole,mismatch ? tr("非表示（縮尺が異なるため）") : state);
         item->setIcon(1,layer.id == m_document->activeLayerId() ? style()->standardIcon(QStyle::SP_DialogApplyButton) : QIcon());
         item->setToolTip(1,tr("クリックで新しい図形の作成先にします。通常表示に戻ります。"));
         item->setText(2,layer.name); item->setToolTip(2,tr("ダブルクリックで名前を変更します。"));
-        item->setText(3,QStringLiteral("1:%1").arg(m_settings ? m_settings->scaleDenominator() : 1,0,'g',12));
+        item->setText(3,QStringLiteral("1:%1").arg(layer.scaleDenominator,0,'g',12));
         ++row;
     }
 }

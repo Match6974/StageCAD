@@ -64,6 +64,46 @@ private slots:
         QVERIFY(!document.setLayerVisibility(first,static_cast<LayerVisibility>(99)));
         QVERIFY(!document.setActiveLayer(QUuid::createUuid()));
     }
+    /// @brief 縮尺をレイヤーごとに保持し、実寸・表示設定・Redo分岐を壊さないことを検証する。
+    void layerScalesAndVisibility() {
+        // document: 共有表示とは独立してレイヤー縮尺を保持する文書。
+        DrawingDocument document;
+        // first: 初期レイヤー。a: 実寸1000mmの線。
+        const auto first = document.activeLayerId();
+        const auto a = document.addShape(QLineF(0,0,1000,0));
+        // second: 初期1:1で追加する第2レイヤー。b: その上の円。
+        const auto second = document.addLayer(); QCOMPARE(document.layer(second)->scaleDenominator,1.0);
+        const auto b = document.addShape(CircleGeometry{{50,50},10});
+        QVERIFY(document.setCircleRadius(b,20)); QVERIFY(document.undo()); QVERIFY(document.canRedo());
+        // history: 縮尺操作は履歴を増やさず、Redoも維持することの監視。
+        QSignalSpy history(&document,&DrawingDocument::historyChanged);
+        QVERIFY(document.setLayerScale(first,100));
+        QCOMPARE(document.effectiveLayerVisibility(first),LayerVisibility::Hidden); QVERIFY(!document.canEditShape(a));
+        QCOMPARE(document.layer(first)->visibility,LayerVisibility::Visible); QVERIFY(document.canEditShape(b));
+        QVERIFY(document.setActiveLayer(first)); QCOMPARE(document.effectiveLayerVisibility(second),LayerVisibility::Hidden);
+        QVERIFY(document.canEditShape(a)); QVERIFY(!document.canEditShape(b));
+        QCOMPARE(std::get<QLineF>(document.shape(a)->geometryMm).length(),1000.0);
+        QVERIFY(document.setLayerScale(second,100)); QCOMPARE(document.effectiveLayerVisibility(second),LayerVisibility::Visible);
+        QVERIFY(document.setLayerVisibility(second,LayerVisibility::Gray));
+        QVERIFY(document.setLayerScale(first,50)); QCOMPARE(document.effectiveLayerVisibility(second),LayerVisibility::Hidden);
+        QCOMPARE(document.layer(second)->visibility,LayerVisibility::Gray);
+        QVERIFY(document.setLayerScale(first,100)); QCOMPARE(document.effectiveLayerVisibility(second),LayerVisibility::Gray);
+        QVERIFY(document.setLayerVisibility(second,LayerVisibility::Hidden));
+        QVERIFY(document.setLayerScale(first,50)); QVERIFY(document.setLayerScale(first,100));
+        QCOMPARE(document.effectiveLayerVisibility(second),LayerVisibility::Hidden);
+        QCOMPARE(history.count(),0); QVERIFY(document.canRedo());
+        // invalid: 元の値・表示・履歴を変えてはいけない縮尺指定。
+        for (const double invalid : {0.0,-1.0,10001.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+            QVERIFY(!document.setLayerScale(first,invalid));
+        QVERIFY(!document.setLayerScale(QUuid::createUuid(),50));
+        QCOMPARE(document.layer(first)->scaleDenominator,100.0); QVERIFY(document.canRedo());
+        QVERIFY(document.renameLayer(first,"照明")); QVERIFY(document.setLayerScale(first,25)); QVERIFY(document.undo());
+        QCOMPARE(document.layer(first)->name,QString("レイヤー1")); QCOMPARE(document.layer(first)->scaleDenominator,25.0);
+        // third: 追加を取り消しても、Redoでは履歴外の縮尺設定も復元するレイヤー。
+        const auto third = document.addLayer(); QVERIFY(document.setLayerScale(third,75));
+        QVERIFY(document.undo()); QVERIFY(!document.layer(third));
+        QVERIFY(document.redo()); QCOMPARE(document.layer(third)->scaleDenominator,75.0);
+    }
     /// @brief 作成・編集・複数移動・削除のUndo／Redoで正確な値と描画順を復元する。
     void historyRestoresValuesIdsAndOrder() {
         // document: 一連の確定操作の履歴を所有する文書。

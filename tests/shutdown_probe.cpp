@@ -187,6 +187,16 @@ int main(int argc, char **argv)
             // editor: Enter未確定の名前を残すインライン入力欄。
             if (auto *editor = list->findChild<QLineEdit*>()) editor->setText("Pending name");
         }
+        if (scenario == "layer-scales") {
+            // view: 異なる縮尺を持つレイヤーの同期接続を破棄するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // first: 最初のレイヤー。second: 異なる縮尺へ切り替えるレイヤー。
+            const auto first = view->document()->activeLayerId();
+            view->document()->setLayerScale(first,100);
+            const auto second = view->document()->addLayer(); view->document()->setLayerScale(second,50);
+            view->document()->addShape(CircleGeometry{{0,0},10});
+            view->document()->setActiveLayer(first);
+        }
         if (!w.close()) app.exit(6);
     });
     // コールバック: 正常に終了しない場合は5秒で異常終了し、テストの停止を検出する。

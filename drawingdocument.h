@@ -85,6 +85,13 @@ public:
     /// @param id 対象レイヤーUUID。
     /// @param visibility 通常・非表示・グレイのいずれか。
     bool setLayerVisibility(const QUuid &id,LayerVisibility visibility);
+    /// @brief 対象レイヤーの縮尺だけを変更する。実寸と履歴は変更しない。
+    /// @param id 対象レイヤーUUID。
+    /// @param denominator 縮尺1:Nの分母。表示設定と共通の有限な許容範囲に限る。
+    bool setLayerScale(const QUuid &id,double denominator);
+    /// @brief 手動表示状態と、アクティブレイヤーとの縮尺一致から実際の表示状態を返す。
+    /// @param id 既存レイヤーUUID。存在しない場合は非表示を返す。
+    LayerVisibility effectiveLayerVisibility(const QUuid &id) const;
     /// @brief アクティブレイヤーに新しい図形を作成できるかを返す。
     bool canCreateShape() const;
     /// @brief 図形が存在し、通常表示レイヤーに所属しているかを返す。

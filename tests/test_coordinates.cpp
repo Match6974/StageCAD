@@ -4,6 +4,10 @@
  */
 
 #include "drawingsettings.h"
+#include "drawingdocument.h"
+#include "shapeselectionmodel.h"
+#include "pdfplacement.h"
+#include <QTreeWidget>
 #include "drawingview.h"
 #include "mainwindow.h"
 #include "scaledialog.h"
@@ -296,6 +300,66 @@ private slots:
         input->setText("50,25");
         QCOMPARE(dialog.scaleDenominator(), 50.25);
         QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+    }
+
+    /// @brief レイヤー別縮尺の実ダイアログ、表示・選択・用紙換算とPDF実寸の保持を検証する。
+    void perLayerScaleTransactions() {
+        // startup: 起動時のPDF選択を取り消すタイマー。
+        QTimer startup; answerFileDialog(startup);
+        // window: 表示バーとナビゲーションを含む統合画面。
+        MainWindow window; startup.stop(); window.show();
+        // view: 実寸の文書と描画アイテムを所有するビュー。
+        auto *view = window.findChild<DrawingView*>();
+        // document: 各レイヤーの縮尺の正本。
+        auto *document = view->document();
+        // settings: アクティブレイヤーを用紙表示へ換算する設定。
+        auto *settings = window.findChild<DrawingSettings*>();
+        // list: 各レイヤーの縮尺・実効状態を表示する一覧。
+        auto *list = window.findChild<QTreeWidget*>("layerList");
+        // action: アクティブレイヤーだけに適用する既存の縮尺ボタン。
+        auto *action = window.findChild<QAction*>("editScaleAction");
+        // first: 1:100に変更する初期レイヤー。
+        const auto first = document->activeLayerId();
+        // line: 縮尺に関係なく実寸1000mmを保つ対象。
+        const auto line = document->addShape(QLineF(0,0,1000,0));
+        QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
+        // pdf: 表示換算で実寸配置を変えないPDFモデル。
+        auto *pdf = window.findChild<PdfPlacement*>();
+        // originalPdf: 補正・配置の変化がないことを比較する値。
+        const auto originalPdf = pdf->geometry();
+        // accept: 現在のレイヤーだけを1:100にする実ダイアログの応答。
+        QTimer accept; answerScaleDialog(accept,"100",true); action->trigger(); accept.stop();
+        QCOMPARE(document->layer(first)->scaleDenominator,100.0); QCOMPARE(settings->scaleDenominator(),100.0);
+        QCOMPARE(QLineF(settings->modelToPaperMm({0,0}),settings->modelToPaperMm({1000,0})).length(),10.0);
+        // second: 新規レイヤーは1:1で始まり、アクティブ切替時に表示倍率も切り替わる。
+        const auto second = document->addLayer(); QCOMPARE(settings->scaleDenominator(),1.0);
+        QCOMPARE(document->layer(first)->scaleDenominator,100.0); QVERIFY(!view->shapeItems().first()->isVisible());
+        QVERIFY(!view->selectionModel()->selectOnly(line));
+        // rectangle: 第2レイヤー上の形状。実寸と所属を保持する。
+        const auto rectangle = document->addShape(QRectF(-2000,-1000,4000,2000));
+        QVERIFY(settings->setScaleDenominator(50));
+        QCOMPARE(document->layer(second)->scaleDenominator,50.0); QCOMPARE(document->layer(first)->scaleDenominator,100.0);
+        QCOMPARE(list->topLevelItem(0)->text(3),QString("1:100")); QCOMPARE(list->topLevelItem(1)->text(3),QString("1:50"));
+        QVERIFY(list->topLevelItem(0)->toolTip(0).contains(QString::fromUtf8("縮尺")));
+        QVERIFY(view->selectionModel()->selectOnly(rectangle));
+        // cancel: 別の縮尺を入力しても取消では正本と表示を変えない。
+        QTimer cancel; answerScaleDialog(cancel,"25",false); action->trigger(); cancel.stop();
+        QCOMPARE(document->layer(second)->scaleDenominator,50.0); QCOMPARE(settings->scaleDenominator(),50.0);
+        QVERIFY(document->setLayerVisibility(first,LayerVisibility::Gray));
+        QVERIFY(document->setLayerScale(second,100)); QVERIFY(view->shapeItems().first()->isVisible());
+        QCOMPARE(document->effectiveLayerVisibility(first),LayerVisibility::Gray);
+        QVERIFY(document->setLayerScale(second,50)); QVERIFY(!view->shapeItems().first()->isVisible());
+        QCOMPARE(document->layer(first)->visibility,LayerVisibility::Gray);
+        QCOMPARE(std::get<QRectF>(document->shape(rectangle)->geometryMm),QRectF(-2000,-1000,4000,2000));
+        QCOMPARE(std::get<QLineF>(document->shape(line)->geometryMm).length(),1000.0);
+        QCOMPARE(pdf->geometry().sizeMm,originalPdf.sizeMm); QCOMPARE(pdf->geometry().centerMm,originalPdf.centerMm);
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step4-layer-scales.png"));
+        QVERIFY(document->setActiveLayer(first)); QCOMPARE(settings->scaleDenominator(),100.0);
+        QVERIFY(view->shapeItems().first()->isVisible()); QVERIFY(!view->shapeItems().last()->isVisible());
+        QVERIFY(view->selectionModel()->selectedIds().isEmpty());
+        QVERIFY(window.findChild<QLabel*>("drawingScaleLabel")->text().contains("1:100"));
+        QVERIFY(document->setLayerScale(second,100)); QVERIFY(view->shapeItems().last()->isVisible());
+        QCOMPARE(document->shape(rectangle)->layerId,second);
     }
 
     /// @brief 縮尺の確定・取消、座標表示、関連UIの更新を実際の画面で検証する。

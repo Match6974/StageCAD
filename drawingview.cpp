@@ -137,6 +137,8 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
     m_document = new DrawingDocument(this); m_document->setObjectName("drawingDocument");
+    // 単独ビューを既存縮尺で作る場合も、最初のレイヤーと表示変換を一致させる。
+    m_document->setLayerScale(m_document->activeLayerId(),m_settings->scaleDenominator());
     m_selectionModel = new ShapeSelectionModel(m_document, this);
     m_selectionModel->setObjectName("shapeSelectionModel");
     // コールバック: 外部からの選択変更でも未確定移動を取り消し、表示と通知を更新する。
@@ -154,6 +156,9 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     // コールバック: レイヤー変更で未確定描画を破棄し、表示・色・選択可否を同期する。
     connect(m_document,&DrawingDocument::layersChanged,this,[this] {
         endShapeMove(false); cancelDrawing();
+        // active: 今回の表示換算へ反映するアクティブレイヤーの値。
+        const auto active = m_document->layer(m_document->activeLayerId());
+        if (active) m_settings->setScaleDenominator(active->scaleDenominator);
         // data: 表示属性を再適用する確定図形。
         for (const auto &data : m_document->shapes()) syncShape(data.id);
     });
@@ -189,6 +194,14 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     m_printableArea->setZValue(-999);
 
     connect(settings, &DrawingSettings::scaleChanged, this, &DrawingView::updatePaper);
+    // denominator: 既存の表示設定APIから変更された新しい縮尺の分母。
+    // コールバック: 表示設定への既存呼び出しもアクティブレイヤーだけへ反映する。
+    m_scaleConnection = connect(settings,&DrawingSettings::scaleChanged,this,[this](double denominator) {
+        // active: 表示値と二重適用・循環しないよう比較する正本の縮尺。
+        const auto active = m_document->layer(m_document->activeLayerId());
+        if (active && active->scaleDenominator != denominator && !m_document->setLayerScale(active->id,denominator))
+            m_settings->setScaleDenominator(active->scaleDenominator);
+    });
     updatePaper();
 }
 
@@ -197,6 +210,7 @@ DrawingView::~DrawingView()
 {
     disconnect(scene(), nullptr, this, nullptr);
     disconnect(m_document, nullptr, this, nullptr);
+    disconnect(m_scaleConnection);
     disconnect(horizontalScrollBar(), nullptr, this, nullptr);
     disconnect(verticalScrollBar(), nullptr, this, nullptr);
     // 文書破棄による選択解除通知より先にモデルを解放する。Qtの子リストからも自動で外れる。
@@ -426,16 +440,18 @@ void DrawingView::syncShape(const QUuid &id)
     }
     // owner: 表示と編集可否を決める所属レイヤー。
     const auto owner = m_document->layer(data->layerId);
+    // visibility: 縮尺による一時的な非表示を含む実効状態。
+    const auto visibility = m_document->effectiveLayerVisibility(data->layerId);
     // pen: グレイ参照では色だけを変え、画面線幅を維持するペン。
     QPen pen = shapePen();
     // brush: 通常の面表示または参照用の薄いグレイ塗り。
     QBrush brush = shapeBrush();
-    if (owner && owner->visibility == LayerVisibility::Gray) { pen.setColor(QColor("#999999")); brush = QColor(160,160,160,35); }
+    if (visibility == LayerVisibility::Gray) { pen.setColor(QColor("#999999")); brush = QColor(160,160,160,35); }
     if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) line->setPen(pen);
     else if (auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(item)) { rect->setPen(pen); rect->setBrush(brush); }
     else if (auto *ellipse = qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) { ellipse->setPen(pen); ellipse->setBrush(brush); }
     else if (auto *polygon = qgraphicsitem_cast<QGraphicsPolygonItem*>(item)) { polygon->setPen(pen); polygon->setBrush(brush); }
-    item->setVisible(owner && owner->visibility != LayerVisibility::Hidden);
+    item->setVisible(owner && visibility != LayerVisibility::Hidden);
     item->setFlag(QGraphicsItem::ItemIsSelectable,m_document->canEditShape(data->id));
     item->setTransform(data->rectangleTransform());
     item->setPos(data->positionMm);

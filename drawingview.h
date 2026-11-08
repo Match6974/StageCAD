@@ -209,6 +209,8 @@ private:
     /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void removeShapeItem(const QUuid &id);
 
+    // m_scaleConnection: 設定が先に破棄されても安全に解除できる、縮尺の双方向同期接続。
+    QMetaObject::Connection m_scaleConnection;
     // m_settings: ビューが参照する作業領域設定。所有権は呼び出し側のQObjectにある。
     DrawingSettings *m_settings;
     // m_paper: シーンが所有する用紙背景の矩形アイテム。

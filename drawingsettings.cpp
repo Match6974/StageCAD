@@ -11,14 +11,6 @@
 /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
 DrawingSettings::DrawingSettings(QObject *parent) : QObject(parent) {}
 
-/// @brief 縮尺の分母が有限で、描画可能な上下限内にあるかを返す。
-/// @param denominator 縮尺1:Nの分母N。
-bool DrawingSettings::isValidScale(double denominator)
-{
-    return std::isfinite(denominator) && denominator >= minimumScale
-        && denominator <= maximumScale;
-}
-
 /// @brief 有効な縮尺だけを反映し、値が変わった場合に通知する。不正値ではfalse。
 /// @param denominator 縮尺1:Nの分母N。
 bool DrawingSettings::setScaleDenominator(double denominator)

@@ -27,7 +27,7 @@ private:
     void refresh();
     // m_document: 文書の寿命を監視する弱い参照。
     QPointer<DrawingDocument> m_document;
-    // m_settings: 現在の共有縮尺を表示する設定への弱い参照。
+    // m_settings: 作業領域の縮尺変更通知を監視する表示設定への弱い参照。
     QPointer<DrawingSettings> m_settings;
     // m_list: 4列のレイヤー一覧。パネルが所有する。
     QTreeWidget *m_list;

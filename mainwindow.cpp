@@ -510,8 +510,11 @@ void MainWindow::updateSelectionDisplay()
 void MainWindow::editScale()
 {
     // dialog: 操作対象のダイアログ。Qtの親子関係またはスタックで寿命を管理する。
+    // target: ダイアログを開いた時点の対象UUID。別のレイヤーへ誤適用しない。
+    const auto target = m_drawingView->document()->activeLayerId();
     ScaleDialog dialog(m_drawingSettings, this);
-    if (dialog.exec() == QDialog::Accepted) m_drawingSettings->setScaleDenominator(dialog.scaleDenominator());
+    dialog.setWindowTitle(tr("縮尺 — %1").arg(m_drawingView->document()->layer(target)->name));
+    if (dialog.exec() == QDialog::Accepted) m_drawingView->document()->setLayerScale(target,dialog.scaleDenominator());
 }
 
 /// @brief 現在の縮尺と、用紙が覆う実寸mmの範囲を表示する。

@@ -10,8 +10,9 @@
 #include <QPointF>
 #include <QRectF>
 #include <QSizeF>
+#include <cmath>
 
-// STEP 1: settings for one drawing space. A future layer can own one instance.
+// アクティブレイヤーの縮尺を表示変換へ反映する作業領域の設定。
 // Model coordinates are real-world mm, with +X right and +Y up.
 /// @brief 1つの作業領域の縮尺と用紙設定を保持する。図形の実寸座標は変更しない。
 class DrawingSettings : public QObject
@@ -29,7 +30,9 @@ public:
     bool setScaleDenominator(double denominator);
     /// @brief 縮尺の分母が有限で、描画可能な上下限内にあるかを返す。
     /// @param denominator 縮尺1:Nの分母N。
-    static bool isValidScale(double denominator);
+    static bool isValidScale(double denominator) {
+        return std::isfinite(denominator) && denominator >= minimumScale && denominator <= maximumScale;
+    }
 
     /// @brief A4用紙の物理寸法をmmで返す。
     QSizeF paperSizeMm() const { return {210.0, 297.0}; }
