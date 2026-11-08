@@ -139,8 +139,11 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
         connect(selection, &QObject::destroyed, this, [this] { m_selection = nullptr; refresh(); });
     }
     if (document) {
-        connect(document, &DrawingDocument::shapeChanged, this, &ObjectInfoPanel::refresh);
-        connect(document, &DrawingDocument::shapeRemoved, this, &ObjectInfoPanel::refresh);
+        // id: 変更・削除された図形のUUID。選択外の変更では現在の下書きを消さない。
+        // コールバック: 表示中の図形だけを最新値へ同期し、他の図形の更新を無視する。
+        const auto refreshSelected = [this](const QUuid &id) { if (id == m_editId) refresh(); };
+        connect(document, &DrawingDocument::shapeChanged, this, refreshSelected);
+        connect(document, &DrawingDocument::shapeRemoved, this, refreshSelected);
         // コールバック: 文書の破棄後は形状データを読まず、未選択表示へ戻す。
         connect(document, &QObject::destroyed, this, [this] { m_document = nullptr; refresh(); });
     }

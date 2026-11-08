@@ -15,6 +15,7 @@
 #include <QGraphicsRectItem>
 #include <QDockWidget>
 #include <QCheckBox>
+#include <QToolButton>
 #include <QAction>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -161,6 +162,28 @@ private slots:
         QTest::mouseClick(info->findChild<QCheckBox*>("polygonClosed"),Qt::LeftButton);
         QVERIFY(!view->document()->shape(polygon)->polygonClosed);
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-polygon-properties.png"));
+        // palette: 編集後に実際のツールボタンから描画を再開する基本パレット。
+        auto *palette = window.findChild<ToolPalette*>();
+        // tool: 編集済み図形の選択を残したまま、新たに描く図形の種類。
+        for (const auto tool : {DrawingTool::Line,DrawingTool::Rectangle,DrawingTool::Circle,DrawingTool::Polygon}) {
+            // button: 対象アクションを表示する、パレット所有の実ボタン。
+            QToolButton *button = nullptr;
+            // candidate: 基本パレット内の各ツールボタン。
+            for (auto *candidate : palette->findChildren<QToolButton*>())
+                if (candidate->defaultAction() == palette->toolAction(tool)) button = candidate;
+            QVERIFY(button); QTest::mouseClick(button,Qt::LeftButton);
+            QCOMPARE(view->activeTool(),tool); QVERIFY(view->drawingEnabled());
+            // count: この操作で図形が1件増えることを確認する変更前の件数。
+            const auto count = view->document()->shapes().size();
+            QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({-70,70}));
+            QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({-30,50}));
+            if (tool == DrawingTool::Polygon) {
+                QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({-60,30}));
+                QVERIFY(view->finishPolygon());
+            }
+            QCOMPARE(view->document()->shapes().size(),count+1);
+        }
+
 
     }
     /// @brief 回転矩形・開いた円弧と多角形の描画・選択判定、および移動の整合性を検証する。
@@ -207,6 +230,116 @@ private slots:
         QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({30,-40}));
         QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({polygon}));
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(view.grab().save("step3-extended-geometry.png"));
+    }
+    /// @brief 表示と数値の双方向同期を確認する7種類の図形状態を用意する。
+    void bidirectionalPropertySync_data() {
+        QTest::addColumn<QString>("kind");
+        // name: 水平線・斜線・回転四角・真円・円弧・開閉多角形のケース名。
+        for (const char *name : {"line","diagonal","rectangle","circle","arc","polygon","open-polygon"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+    /// @brief 連続数値編集、図面での移動・取消、縮尺変更後の実寸と再選択を検証する。
+    void bidirectionalPropertySync() {
+        // kind: 検証する図形状態の名前。
+        QFETCH(QString,kind);
+        // settings: 縮尺を変更してもモデルの実寸を保つ設定。
+        DrawingSettings settings;
+        // view: 図形文書・選択と表示アイテムを所有するビュー。
+        DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        // document: 数値と描画で共有する形状の正本。
+        auto *document = view.document();
+        // geometry: 対象ケースの初期形状（実寸mm）。
+        ShapeGeometry geometry = QLineF(-20,-10,20,kind == "line" ? -10 : 10);
+        if (kind == "rectangle") geometry = QRectF(-20,-10,40,20);
+        else if (kind == "circle" || kind == "arc") geometry = CircleGeometry{{0,0},20};
+        else if (kind.contains("polygon")) geometry = QPolygonF({{-20,-10},{20,-10},{5,20}});
+        // id: 全操作で維持する単一図形のUUID。
+        const auto id = document->addShape(geometry);
+        // initial: 移動済み・回転済み・開いた状態も含める初期値のコピー。
+        auto initial = *document->shape(id); initial.positionMm = {5,10};
+        if (kind == "rectangle") initial.rectangleAngleDeg = 30;
+        if (kind == "arc") std::get<CircleGeometry>(initial.geometryMm).sweepAngleDeg = 120;
+        if (kind == "open-polygon") initial.polygonClosed = false;
+        QVERIFY(document->updateShape(initial));
+        // panel: 数値を入力し、図面からの変更を表示するパレット。
+        ObjectInfoPanel panel(document,view.selectionModel()); panel.show();
+        connect(&panel,&ObjectInfoPanel::vertexHighlighted,&view,&DrawingView::highlightVertex);
+        QVERIFY(view.selectionModel()->selectOnly(id));
+        // item: 数値編集・移動・ズームで作り直さない表示アイテム。
+        auto *item = view.shapeItems().first();
+        // changes: 確定1回に対して文書変更通知が1回だけであることの監視。
+        QSignalSpy changes(document,&DrawingDocument::shapeChanged);
+        // selections: 形状変更だけでは選択を変えないことの監視。
+        QSignalSpy selections(view.selectionModel(),&ShapeSelectionModel::selectionChanged);
+        // edits: 種類に対応する連続入力。角度は度、他は実寸mm。
+        QList<QPair<QString,QString>> edits;
+        if (initial.kind() == ShapeKind::Line) edits = {{"length","60"},{"angle","45"},{"startX","-25"},{"endY","50"}};
+        else if (initial.kind() == ShapeKind::Rectangle) edits = {{"width","60"},{"height","40"},{"rectangleAngle","60"},{"originX","25"},{"originY","-20"}};
+        else if (initial.kind() == ShapeKind::Circle) edits = {{"centerX","-20"},{"centerY","10"},{"diameter","60"},{"radius","25"},{"arcStart","30"},{"arcSweep",kind == "arc" ? "150" : "360"}};
+        else edits = {{"width","60"},{"height","45"},{"originX","-20"},{"originY","-10"},{"vertexX","-15"},{"vertexY","-5"}};
+        // edit: 各項目をEnterで確定し、その直後の表示を検査する入力。
+        for (const auto &edit : edits) {
+            // input: パレットが所有する対象の数値欄。
+            auto *input = panel.findChild<QLineEdit*>("edit_"+edit.first); QVERIFY(input && input->isVisible());
+            // before: 確定前の通知数。再入や循環による多重通知も検出する。
+            const auto before = changes.count();
+            input->setFocus(); input->selectAll(); QTest::keyClicks(input,edit.second); QTest::keyClick(input,Qt::Key_Return);
+            QCOMPARE(changes.count(),before+1); QCOMPARE(selections.count(),0);
+            QCOMPARE(view.shapeItems().first(),item); QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({id}));
+            // data: 確定した現在のモデル形状。表示アイテムの実データと比較する。
+            const auto data = *document->shape(id);
+            QCOMPARE(item->pos(),data.positionMm);
+            if (data.kind() == ShapeKind::Line) QCOMPARE(qgraphicsitem_cast<QGraphicsLineItem*>(item)->line(),std::get<QLineF>(data.geometryMm));
+            else if (data.kind() == ShapeKind::Rectangle) {
+                // drawn: 表示アイテムに設定された辺長・回転・配置を反映したパス。
+                QPainterPath drawn; drawn.addRect(qgraphicsitem_cast<QGraphicsRectItem*>(item)->rect());
+                QCOMPARE(item->mapToScene(drawn),data.localPath().translated(data.positionMm));
+            } else if (data.kind() == ShapeKind::Circle) {
+                // circle: パレット編集後の中心と半径（実寸mm）。
+                const auto circle = std::get<CircleGeometry>(data.geometryMm);
+                QCOMPARE(qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->rect().center(),circle.centerMm);
+                QCOMPARE(qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->rect().width(),2*circle.radiusMm);
+                QVERIFY(item->shape().contains(data.localPath().pointAtPercent(0.5)));
+                if (!data.isFilled()) QVERIFY(!item->shape().contains(circle.centerMm));
+            } else QCOMPARE(qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->polygon(),std::get<QPolygonF>(data.geometryMm));
+        }
+        // old: マウス移動前の確定済み形状。移動中と取消時は数値に書き戻さない。
+        const auto old = *document->shape(id);
+        // key: マウス移動で変化する位置を表示する項目名。
+        const QString key = old.kind() == ShapeKind::Line ? "startX" : old.kind() == ShapeKind::Circle ? "centerX" : "originX";
+        // coordinate: 図面操作の結果を確認するX入力欄。
+        auto *coordinate = panel.findChild<QLineEdit*>("edit_"+key);
+        // previousText: 移動プレビューで上書きしない確定値表示。
+        const QString previousText = coordinate->text();
+        // vertical: 同じ位置のY成分を表示する入力欄。
+        auto *vertical = panel.findChild<QLineEdit*>("edit_"+key.left(key.size()-1)+"Y");
+        // previousY: 移動前のY表示値（実寸mm）。
+        const double previousY = vertical->text().toDouble();
+        // start: 確実に線上を選択する、最初の描画頂点の画面位置。
+        const QPoint start = view.mapFromScene(old.localPath().pointAtPercent(0)+old.positionMm);
+        // end: 画面上で移動先にする点（px）。
+        const QPoint end = start+QPoint(30,-25);
+        // delta: 画面の移動距離を換算した実寸移動量（mm）。
+        const QPointF delta = view.mapToScene(end)-view.mapToScene(start);
+        QTest::mousePress(view.viewport(),Qt::LeftButton,Qt::NoModifier,start);
+        // move: ドラッグ距離を超えているマウス移動イベント。
+        QMouseEvent move(QEvent::MouseMove,end,view.viewport()->mapToGlobal(end),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(),&move);
+        QCOMPARE(coordinate->text(),previousText); QCOMPARE(document->shape(id)->positionMm,old.positionMm);
+        QTest::mouseRelease(view.viewport(),Qt::LeftButton,Qt::NoModifier,end);
+        QVERIFY(QLineF(document->shape(id)->positionMm,old.positionMm+delta).length()<1e-8);
+        QVERIFY(std::abs(coordinate->text().toDouble()-(previousText.toDouble()+delta.x()))<0.000002);
+        QVERIFY(std::abs(vertical->text().toDouble()-(previousY+delta.y()))<0.000002);
+        // committed: 縮尺・ズーム・移動取消で変わってはならない確定位置。
+        const QPointF committed = document->shape(id)->positionMm;
+        QVERIFY(view.setDisplayZoom(2)); QVERIFY(settings.setScaleDenominator(50));
+        QCOMPARE(document->shape(id)->positionMm,committed); QCOMPARE(document->shape(id)->localPath(),old.localPath());
+        QTest::mousePress(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene(document->shape(id)->localPath().pointAtPercent(0)+committed));
+        QApplication::sendEvent(view.viewport(),&move); QTest::keyClick(&view,Qt::Key_Escape);
+        QCOMPARE(document->shape(id)->positionMm,committed); QCOMPARE(item->pos(),committed);
+        view.selectionModel()->clear(); QVERIFY(coordinate->text().isEmpty());
+        QVERIFY(view.selectionModel()->selectOnly(id)); QVERIFY(!coordinate->text().isEmpty());
+        QVERIFY(document->removeShapes({id})); QVERIFY(view.shapeItems().isEmpty()); QVERIFY(coordinate->text().isEmpty());
     }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {

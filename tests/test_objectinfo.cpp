@@ -312,6 +312,32 @@ private slots:
         QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).size(),2);
         selection.clear(); QVERIFY(!editor(panel,"vertexX")->isVisible());
     }
+    /// @brief 選択外の図形変更で入力を消さず、選択中の変更だけ最新値へ同期する。
+    void unrelatedChangesKeepDraft() {
+        // document: 選択中・選択外の図形を同時に保持する文書。
+        DrawingDocument document;
+        // selection: パレットに表示する1個の図形を指定するモデル。
+        ShapeSelectionModel selection(&document);
+        // panel: 変更通知の対象UUIDで更新を絞る情報パレット。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // selected: 未確定の長さ入力を保持する直線UUID。
+        const auto selected = document.addShape(QLineF(0,0,40,0));
+        // other: パレットに表示していない円のUUID。
+        const auto other = document.addShape(CircleGeometry{{100,100},10});
+        QVERIFY(selection.selectOnly(selected));
+        editor(panel,"length")->setFocus(); editor(panel,"length")->setText("99"); editor(panel,"length")->setModified(true);
+        QVERIFY(document.translateShapes({other},{10,10}));
+        QCOMPARE(editor(panel,"length")->text(),QString("99")); QVERIFY(editor(panel,"length")->isModified());
+        QVERIFY(document.removeShapes({other})); QCOMPARE(editor(panel,"length")->text(),QString("99"));
+        // selectedChanges: 入力確定が1回の通知だけでモデルを更新することの監視。
+        QSignalSpy selectedChanges(&document,&DrawingDocument::shapeChanged);
+        QTest::keyClick(editor(panel,"length"),Qt::Key_Return);
+        QCOMPARE(document.shape(selected)->localPath().boundingRect().width(),99.0); QCOMPARE(selectedChanges.count(),1);
+        editor(panel,"startX")->setText("88"); editor(panel,"startX")->setModified(true);
+        QVERIFY(document.translateShapes({selected},{10,20}));
+        QCOMPARE(editor(panel,"startX")->text(),QString("10")); QVERIFY(!editor(panel,"startX")->isModified());
+        QVERIFY(document.removeShapes({selected})); QVERIFY(editor(panel,"length")->text().isEmpty());
+    }
     /// @brief 6項目の入力が実寸に反映され、長さ・角度では始点を固定することを検証する。
     void lineEditingKeepsFirstPoint() {
         // document: 移動済みの直線も編集できることを確認する文書。
