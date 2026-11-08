@@ -1,5 +1,6 @@
 #include "drawingview.h"
 #include "drawingsettings.h"
+#include "drawingdocument.h"
 
 #include <QGraphicsRectItem>
 #include <QGraphicsLineItem>
@@ -22,26 +23,8 @@
 #include <limits>
 
 namespace {
-bool validPoint(QPointF point)
-{
-    return std::isfinite(point.x()) && std::isfinite(point.y())
-        && std::abs(point.x()) <= 10000000 && std::abs(point.y()) <= 10000000;
-}
-
-bool validPolygon(const QPolygonF &points)
-{
-    if (points.size() < 3) return false;
-    const QPointF first = points[0];
-    for (qsizetype i = 1; i + 1 < points.size(); ++i) {
-        const QPointF a = points[i] - first, b = points[i + 1] - first;
-        const long double lhs = static_cast<long double>(a.x()) * b.y();
-        const long double rhs = static_cast<long double>(a.y()) * b.x();
-        const long double tolerance = 64 * std::numeric_limits<double>::epsilon()
-            * (std::abs(lhs) + std::abs(rhs));
-        if (std::abs(lhs - rhs) > tolerance) return true;
-    }
-    return false;
-}
+bool validPoint(QPointF point) { return ShapeData::validPoint(point); }
+bool validPolygon(const QPolygonF &points) { return ShapeData::validPolygon(points); }
 
 QPointF constrainedLinePoint(QPointF first, QPointF point)
 {
@@ -62,19 +45,6 @@ QPointF constrainedLinePoint(QPointF first, QPointF point)
     return first + direction * projected;
 }
 
-QPainterPath geometryPath(QGraphicsItem *item)
-{
-    QPainterPath path;
-    if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) {
-        path.moveTo(line->line().p1()); path.lineTo(line->line().p2());
-    } else if (auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(item)) path.addRect(rect->rect());
-    else if (auto *circle = qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) path.addEllipse(circle->rect());
-    else if (auto *polygon = qgraphicsitem_cast<QGraphicsPolygonItem*>(item)) {
-        path.addPolygon(polygon->polygon()); path.closeSubpath();
-    }
-    return path;
-}
-
 QPen shapePen()
 {
     QPen pen(QColor("#182b3d"), 1.5); pen.setCosmetic(true); return pen;
@@ -88,6 +58,11 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
 {
     setObjectName("drawingView");
     setScene(new QGraphicsScene(this));
+    m_document = new DrawingDocument(this); m_document->setObjectName("drawingDocument");
+    connect(m_document, &DrawingDocument::aboutToChange, this, [this] { endShapeMove(false); });
+    connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
+    connect(m_document, &DrawingDocument::shapeChanged, this, &DrawingView::syncShape);
+    connect(m_document, &DrawingDocument::shapeRemoved, this, &DrawingView::removeShapeItem);
     m_selectionMenu = new QMenu(this); m_selectionMenu->setObjectName("shapeSelectionMenu");
     auto *remove = m_selectionMenu->addAction(tr("削除")); remove->setObjectName("deleteSelectedShapesAction");
     connect(remove, &QAction::triggered, this, [this] { deleteSelectedShapes(); });
@@ -222,28 +197,15 @@ bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
 bool DrawingView::commitShape(QPointF second)
 {
     const QPointF first = m_draftPoints.first();
-    QGraphicsItem *item = nullptr;
-    const QPen pen = shapePen();
-    const QBrush brush = shapeBrush();
-    if (m_activeTool == DrawingTool::Line && QLineF(first, second).length() > 0)
-        item = scene()->addLine(QLineF(first, second), pen);
-    else if (m_activeTool == DrawingTool::Rectangle) {
-        const QRectF rectangle = QRectF(first, second).normalized();
-        if (rectangle.width() > 0 && rectangle.height() > 0)
-            item = scene()->addRect(rectangle, pen, brush);
-    } else if (m_activeTool == DrawingTool::Circle) {
-        const double radius = QLineF(first, second).length();
-        const QRectF circle(first.x() - radius, first.y() - radius, 2 * radius, 2 * radius);
-        if (radius > 0 && validPoint(circle.topLeft()) && validPoint(circle.bottomRight()))
-            item = scene()->addEllipse(circle, pen, brush);
-    }
-    if (!item) {
+    ShapeGeometry geometry;
+    if (m_activeTool == DrawingTool::Line) geometry = QLineF(first, second);
+    else if (m_activeTool == DrawingTool::Rectangle) geometry = QRectF(first, second).normalized();
+    else if (m_activeTool == DrawingTool::Circle) geometry = CircleGeometry{first, QLineF(first, second).length()};
+    else return false;
+    if (m_document->addShape(geometry).isNull()) {
         emit drawingHintChanged(tr("大きさが0の図形や、範囲外の図形は作成できません。終点を指定し直してください。"));
         return false;
     }
-    item->setData(ShapeToolRole, QVariant::fromValue(m_activeTool));
-    registerShape(item);
-    updateSceneBounds(); setViewCenter(m_viewCenter);
     const DrawingTool created = m_activeTool;
     cancelDrawing(); emit shapeCreated(created);
     return true;
@@ -260,18 +222,63 @@ bool DrawingView::finishPolygon()
         emit drawingHintChanged(tr("多角形には同一直線上にない3点以上が必要です。"));
         return false;
     }
-    auto *item = scene()->addPolygon(m_draftPoints, shapePen(), shapeBrush());
-    item->setData(ShapeToolRole, QVariant::fromValue(DrawingTool::Polygon));
-    registerShape(item);
-    updateSceneBounds(); setViewCenter(m_viewCenter);
+    if (m_document->addShape(m_draftPoints).isNull()) return false;
     cancelDrawing(); emit shapeCreated(DrawingTool::Polygon);
     return true;
 }
 
-void DrawingView::registerShape(QGraphicsItem *item)
+QUuid DrawingView::shapeId(const QGraphicsItem *item) const
 {
-    item->setFlag(QGraphicsItem::ItemIsSelectable);
-    m_shapes.append(item);
+    if (!m_shapes.contains(const_cast<QGraphicsItem*>(item))) return {};
+    return item->data(ShapeIdRole).toUuid();
+}
+
+void DrawingView::syncShape(const QUuid &id)
+{
+    const auto data = m_document->shape(id);
+    if (!data) return;
+    auto *item = m_shapeGraphics.value(id, nullptr);
+    const bool added = !item;
+    DrawingTool tool = DrawingTool::Line;
+    switch (data->kind()) {
+    case ShapeKind::Line:
+        if (!item) item = scene()->addLine({}, shapePen());
+        qgraphicsitem_cast<QGraphicsLineItem*>(item)->setLine(std::get<QLineF>(data->geometryMm));
+        break;
+    case ShapeKind::Rectangle:
+        tool = DrawingTool::Rectangle;
+        if (!item) item = scene()->addRect({}, shapePen(), shapeBrush());
+        qgraphicsitem_cast<QGraphicsRectItem*>(item)->setRect(std::get<QRectF>(data->geometryMm));
+        break;
+    case ShapeKind::Circle: {
+        tool = DrawingTool::Circle;
+        const auto circle = std::get<CircleGeometry>(data->geometryMm);
+        const QPointF radius(circle.radiusMm, circle.radiusMm);
+        if (!item) item = scene()->addEllipse({}, shapePen(), shapeBrush());
+        qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setRect(QRectF(circle.centerMm - radius, circle.centerMm + radius));
+        break;
+    }
+    case ShapeKind::Polygon:
+        tool = DrawingTool::Polygon;
+        if (!item) item = scene()->addPolygon({}, shapePen(), shapeBrush());
+        qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setPolygon(std::get<QPolygonF>(data->geometryMm));
+        break;
+    }
+    item->setPos(data->positionMm);
+    if (added) {
+        item->setFlag(QGraphicsItem::ItemIsSelectable);
+        item->setData(ShapeIdRole, id); item->setData(ShapeToolRole, QVariant::fromValue(tool));
+        m_shapeGraphics.insert(id, item); m_shapes.append(item);
+    }
+    updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
+}
+
+void DrawingView::removeShapeItem(const QUuid &id)
+{
+    auto *item = m_shapeGraphics.take(id);
+    if (!item) return;
+    m_shapes.removeOne(item); delete item;
+    updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
 }
 
 QList<QGraphicsItem*> DrawingView::selectedShapeItems() const
@@ -300,8 +307,10 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
     for (auto it = m_shapes.crbegin(); it != m_shapes.crend(); ++it) {
         auto *item = *it;
         if (!item->isVisible()) continue;
-        const QPainterPath path = viewportTransform().map(item->mapToScene(geometryPath(item)));
-        const bool filled = item->type() != QGraphicsLineItem::Type;
+        const auto data = m_document->shape(shapeId(item));
+        if (!data) continue;
+        const QPainterPath path = viewportTransform().map(item->mapToScene(data->localPath()));
+        const bool filled = data->kind() != ShapeKind::Line;
         if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
     }
     return nullptr;
@@ -309,9 +318,18 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
 
 void DrawingView::endShapeMove(bool commit)
 {
-    if (!commit) for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second);
-    m_moveOrigins.clear(); m_selectionPressed = false;
-    const bool wasMoving = m_movingShapes; m_movingShapes = false;
+    const auto origins = m_moveOrigins;
+    const QPointF delta = m_moveDelta;
+    const bool wasMoving = m_movingShapes;
+    // Clear interaction state before document signals can call back into the view.
+    m_moveOrigins.clear(); m_moveDelta = {}; m_selectionPressed = false; m_movingShapes = false;
+    bool committed = false;
+    if (commit && wasMoving) {
+        QList<QUuid> ids;
+        for (const auto &origin : origins) ids.append(shapeId(origin.first));
+        committed = m_document->translateShapes(ids, delta);
+    }
+    if (!committed) for (const auto &origin : origins) origin.first->setPos(origin.second);
     if (wasMoving) { updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update(); }
 }
 
@@ -319,11 +337,9 @@ bool DrawingView::deleteSelectedShapes()
 {
     if (!m_drawingEnabled || m_picking || m_panning || m_activeTool != DrawingTool::Selection) return false;
     endShapeMove(false);
-    const auto selected = selectedShapeItems();
-    if (selected.isEmpty()) return false;
-    for (auto *item : selected) { m_shapes.removeOne(item); delete item; }
-    updateSceneBounds(); setViewCenter(m_viewCenter); notifySelection();
-    return true;
+    QList<QUuid> ids;
+    for (auto *item : selectedShapeItems()) ids.append(shapeId(item));
+    return m_document->removeShapes(ids);
 }
 
 void DrawingView::contextMenuEvent(QContextMenuEvent *event)
@@ -373,7 +389,8 @@ void DrawingView::updateSceneBounds()
     const double margin = 10 * m_settings->scaleDenominator();
     const QRectF paperBounds = m_paper->rect().adjusted(-margin, -margin, margin, margin);
     QRectF bounds = m_contentBounds.isEmpty() ? paperBounds : paperBounds.united(m_contentBounds);
-    for (auto *shape : m_shapes) bounds = bounds.united(shape->sceneBoundingRect());
+    for (const auto &shape : m_document->shapes())
+        bounds = bounds.united(shape.boundsMm().adjusted(-1, -1, 1, 1));
     scene()->setSceneRect(bounds);
 }
 
@@ -448,12 +465,12 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
         }
         m_movingShapes = true;
         const QPointF delta = point - m_selectionPressMm;
-        bool valid = std::isfinite(delta.x()) && std::isfinite(delta.y());
-        for (const auto &origin : m_moveOrigins) {
-            const QRectF bounds = geometryPath(origin.first).boundingRect().translated(origin.second + delta);
-            valid = valid && validPoint(bounds.topLeft()) && validPoint(bounds.bottomRight());
+        QList<QUuid> ids;
+        for (const auto &origin : m_moveOrigins) ids.append(shapeId(origin.first));
+        if (m_document->canTranslateShapes(ids, delta)) {
+            m_moveDelta = delta;
+            for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second + delta);
         }
-        if (valid) for (const auto &origin : m_moveOrigins) origin.first->setPos(origin.second + delta);
         else emit drawingHintChanged(tr("移動後の座標は±10000000mm以内にしてください。"));
         viewport()->update(); event->accept(); return;
     }

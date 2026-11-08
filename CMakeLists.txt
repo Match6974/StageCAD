@@ -11,6 +11,10 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
 qt_standard_project_setup()
 
 set(STAGECAD_SOURCES
+    shapedata.h
+    shapedata.cpp
+    drawingdocument.h
+    drawingdocument.cpp
     mainwindow.cpp
     mainwindow.h
     mainwindow.ui
@@ -102,6 +106,13 @@ if(BUILD_TESTING)
     add_test(NAME stagecad_drawing_tests COMMAND stagecad_drawing_tests)
     set_tests_properties(stagecad_drawing_tests PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
+    qt_add_executable(stagecad_document_tests tests/test_document.cpp
+        shapedata.cpp shapedata.h drawingdocument.cpp drawingdocument.h)
+    target_include_directories(stagecad_document_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(stagecad_document_tests PRIVATE Qt::Core Qt::Gui Qt::Test)
+    add_test(NAME stagecad_document_tests COMMAND stagecad_document_tests)
+    set_tests_properties(stagecad_document_tests PROPERTIES TIMEOUT 30)
 
     qt_add_executable(stagecad_shutdown_probe
         tests/shutdown_probe.cpp

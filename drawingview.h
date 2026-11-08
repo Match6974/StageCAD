@@ -5,8 +5,11 @@
 #include <optional>
 #include "drawingtool.h"
 #include <QPolygonF>
+#include <QHash>
+#include <QUuid>
 
 class DrawingSettings;
+class DrawingDocument;
 class QMenu;
 class QGraphicsRectItem;
 
@@ -33,6 +36,9 @@ public:
     QList<QGraphicsItem*> selectedShapeItems() const;
     void clearShapeSelection();
     bool deleteSelectedShapes();
+    DrawingDocument *document() const { return m_document; }
+    QUuid shapeId(const QGraphicsItem *item) const;
+    static constexpr int ShapeIdRole = 0x5344;
     static constexpr int ShapeToolRole = 0x5343;
     enum class DistanceKind { Current, Target };
     Q_ENUM(DistanceKind)
@@ -80,7 +86,8 @@ private:
     QGraphicsItem *shapeAt(QPoint viewportPoint) const;
     void notifySelection();
     void endShapeMove(bool commit);
-    void registerShape(QGraphicsItem *item);
+    void syncShape(const QUuid &id);
+    void removeShapeItem(const QUuid &id);
 
     DrawingSettings *m_settings;
     QGraphicsRectItem *m_paper;
@@ -107,7 +114,10 @@ private:
     bool m_drawShift = false;
     QPolygonF m_draftPoints;
     std::optional<QPointF> m_draftHover;
-    QList<QGraphicsItem*> m_shapes;
+    DrawingDocument *m_document;
+    QHash<QUuid, QGraphicsItem*> m_shapeGraphics;
+    QList<QGraphicsItem*> m_shapes; // Display order, not the authoritative geometry.
+    QPointF m_moveDelta;
     QMenu *m_selectionMenu;
     bool m_selectionPressed = false;
     bool m_movingShapes = false;
