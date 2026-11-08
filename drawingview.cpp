@@ -123,7 +123,7 @@ void DrawingView::highlightVertex(QPointF point,bool visible)
     if (!m_vertexMarker) {
         m_vertexMarker = scene()->addEllipse(-4,-4,8,8,QPen(QColor("#c35100"),1),QBrush(QColor("#ffdf60")));
         m_vertexMarker->setFlag(QGraphicsItem::ItemIgnoresTransformations);
-        m_vertexMarker->setAcceptedMouseButtons(Qt::NoButton); m_vertexMarker->setZValue(1000);
+        m_vertexMarker->setAcceptedMouseButtons(Qt::NoButton); m_vertexMarker->setZValue(m_shapes.size()+1);
     }
     m_vertexMarker->setPos(point); m_vertexMarker->setVisible(visible); viewport()->update();
 }
@@ -147,6 +147,10 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     connect(scene(), &QGraphicsScene::selectionChanged, this, &DrawingView::syncSelectionDisplay);
     // コールバック: モデル変更の前に移動プレビューを取り消し、変更前の表示へ戻す。
     connect(m_document, &DrawingDocument::aboutToChange, this, [this] { endShapeMove(false); });
+    // コールバック: 履歴復元では未確定の作成・移動・パンを残さない。
+    connect(m_document,&DrawingDocument::historyAboutToRestore,this,[this] {
+        endShapeMove(false); cancelDrawing(); m_panning = false; m_selectionMenu->hide(); updateInteractionCursor();
+    });
     connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeChanged, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeRemoved, this, &DrawingView::removeShapeItem);
@@ -420,6 +424,15 @@ void DrawingView::syncShape(const QUuid &id)
         item->setData(ShapeIdRole, id); item->setData(ShapeToolRole, QVariant::fromValue(tool));
         m_shapeGraphics.insert(id, item); m_shapes.append(item);
     }
+    // Undoで途中の図形を復元した場合も、モデルの描画順へ表示順・ヒット判定順を揃える。
+    m_shapes.clear();
+    // shape: 文書が保持する元の描画順の図形。
+    for (const auto &shape : m_document->shapes()) {
+        // graphics: すでに復元済みの表示アイテム。シーンが所有する。
+        auto *graphics = m_shapeGraphics.value(shape.id,nullptr);
+        if (graphics) { graphics->setZValue(m_shapes.size()); m_shapes.append(graphics); }
+    }
+    if (m_vertexMarker) m_vertexMarker->setZValue(m_shapes.size()+1);
     updateSceneBounds(); setViewCenter(m_viewCenter); viewport()->update();
 }
 

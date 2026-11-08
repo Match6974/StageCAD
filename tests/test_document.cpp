@@ -12,6 +12,79 @@
 class DocumentTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 作成・編集・複数移動・削除のUndo／Redoで正確な値と描画順を復元する。
+    void historyRestoresValuesIdsAndOrder() {
+        // document: 一連の確定操作の履歴を所有する文書。
+        DrawingDocument document; QVERIFY(!document.canUndo()); QVERIFY(!document.canRedo());
+        // first: 描画順の先頭へ復元する線のUUID。
+        const auto first = document.addShape(QLineF(0.123456789,0,10,0));
+        // middle: 描画順の中間へ復元する回転矩形のUUID。
+        const auto middle = document.addShape(QRectF(0,0,30,40));
+        // last: 描画順の末尾で維持する円のUUID。
+        const auto last = document.addShape(CircleGeometry{{30,40},10});
+        // rotated: 回転と位置を同時に編集する候補。
+        auto rotated = *document.shape(middle); rotated.rectangleAngleDeg = 37; rotated.positionMm = {15,25};
+        QVERIFY(document.updateShape(rotated));
+        QVERIFY(document.translateShapes({first,middle,first},{100,200}));
+        // beforeDelete: 配置・精度・描画順を確認する変更前のコピー。
+        const auto beforeDelete = document.shapes();
+        QVERIFY(document.removeShapes({first,middle})); QCOMPARE(document.shapes().size(),1);
+        QVERIFY(document.undo()); QCOMPARE(document.shapes().size(),3);
+        QCOMPARE(document.shapes()[0].id,first); QCOMPARE(document.shapes()[1].id,middle); QCOMPARE(document.shapes()[2].id,last);
+        QCOMPARE(document.shape(first)->positionMm,beforeDelete[0].positionMm);
+        QCOMPARE(document.shape(middle)->rectangleAngleDeg,37.0);
+        QVERIFY(document.undo()); QCOMPARE(document.shape(first)->positionMm,QPointF()); QCOMPARE(document.shape(middle)->positionMm,QPointF(15,25));
+        QVERIFY(document.undo()); QCOMPARE(document.shape(middle)->rectangleAngleDeg,0.0);
+        QVERIFY(document.redo()); QCOMPARE(document.shape(middle)->rectangleAngleDeg,37.0);
+        QVERIFY(document.redo()); QCOMPARE(document.shape(first)->positionMm,QPointF(100,200));
+        QVERIFY(document.redo()); QVERIFY(!document.shape(first)); QVERIFY(!document.shape(middle));
+        QVERIFY(document.undo());
+        QCOMPARE(std::get<QLineF>(document.shape(first)->geometryMm).x1(),0.123456789);
+        // redo破棄: Undo後の新しい有効変更だけがやり直し分岐を破棄する。
+        QVERIFY(document.setCircleRadius(last,20)); QVERIFY(!document.canRedo()); QVERIFY(!document.redo());
+        while (document.canUndo()) QVERIFY(document.undo());
+        QVERIFY(document.shapes().isEmpty()); QVERIFY(!document.undo());
+        while (document.canRedo()) QVERIFY(document.redo());
+        QCOMPARE(document.shapes().size(),3); QCOMPARE(std::get<CircleGeometry>(document.shape(last)->geometryMm).radiusMm,20.0);
+    }
+    /// @brief 無効値・同値・再入を履歴へ追加せず、Redo分岐も維持することを検証する。
+    void invalidAndNoopKeepHistory() {
+        // document: 無効操作で履歴が壊れないことを検証する文書。
+        DrawingDocument document;
+        // id: 配置表現の違いだけでは履歴を増やさない対象UUID。
+        const auto id = document.addShape(CircleGeometry{{10,20},5});
+        QVERIFY(document.translateShapes({id},{100,200})); QVERIFY(document.setCircleRadius(id,10)); QVERIFY(document.undo());
+        // notifications: 無効・無変更で履歴のindexが変わらないことを確認する監視。
+        QSignalSpy notifications(&document,&DrawingDocument::historyChanged);
+        QVERIFY(!document.setCircleRadius(id,0)); QVERIFY(!document.setCircleRadius(id,std::numeric_limits<double>::quiet_NaN()));
+        QVERIFY(document.translateShapes({id},{0,0}));
+        // canonical: 同じ実寸中心と半径を、配置0へ統合した等価な候補。
+        auto canonical = *document.shape(id); std::get<CircleGeometry>(canonical.geometryMm).centerMm += canonical.positionMm; canonical.positionMm = {};
+        QVERIFY(document.updateShape(canonical)); QVERIFY(document.canRedo()); QCOMPARE(notifications.count(),0);
+        // reentered: 復元中のUndo再入が拒否されるかを確認する結果。
+        bool reentered = true;
+        // コールバック: 復元通知内で履歴をもう1段階進めないことを検証する。
+        connect(&document,&DrawingDocument::aboutToChange,&document,[&] { reentered = document.undo(); });
+        QVERIFY(document.redo()); QVERIFY(!reentered); QCOMPARE(std::get<CircleGeometry>(document.shape(id)->geometryMm).radiusMm,10.0);
+    }
+    /// @brief 円弧・多角形の頂点と開閉属性を、Undo／Redoで完全に復元する。
+    void extendedPropertiesHistory() {
+        // document: 図形属性の履歴を検証する文書。
+        DrawingDocument document;
+        // circle: 円弧角を戻す対象のUUID。
+        const auto circle = document.addShape(CircleGeometry{{10,20},5});
+        // polygon: 頂点列と開閉を戻す対象のUUID。
+        const auto polygon = document.addShape(QPolygonF({{0,0},{30,0},{10,20}}));
+        // edited: 円弧と多角形の属性変更候補。
+        auto edited = *document.shape(circle); std::get<CircleGeometry>(edited.geometryMm).startAngleDeg = 45;
+        std::get<CircleGeometry>(edited.geometryMm).sweepAngleDeg = 90; QVERIFY(document.updateShape(edited));
+        edited = *document.shape(polygon); edited.polygonClosed = false;
+        std::get<QPolygonF>(edited.geometryMm).append({-10,10}); QVERIFY(document.updateShape(edited));
+        QVERIFY(document.undo()); QVERIFY(document.shape(polygon)->polygonClosed); QCOMPARE(std::get<QPolygonF>(document.shape(polygon)->geometryMm).size(),3);
+        QVERIFY(document.undo()); QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).sweepAngleDeg,360.0);
+        QVERIFY(document.redo()); QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).startAngleDeg,45.0);
+        QVERIFY(document.redo()); QVERIFY(!document.shape(polygon)->polygonClosed); QCOMPARE(std::get<QPolygonF>(document.shape(polygon)->geometryMm).size(),4);
+    }
     /// @brief 拡張属性のコピー・範囲検証・再入拒否と型・UUIDの維持を検証する。
     void propertyUpdatesAreAtomic() {
         // document: 型と描画順を維持して更新する文書。

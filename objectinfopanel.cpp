@@ -20,6 +20,7 @@
 #include <QLineEdit>
 #include <QDoubleValidator>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <limits>
 #include <cmath>
 
@@ -139,6 +140,7 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
         connect(selection, &QObject::destroyed, this, [this] { m_selection = nullptr; refresh(); });
     }
     if (document) {
+        connect(document,&DrawingDocument::historyAboutToRestore,this,&ObjectInfoPanel::refresh);
         // id: 変更・削除された図形のUUID。選択外の変更では現在の下書きを消さない。
         // コールバック: 表示中の図形だけを最新値へ同期し、他の図形の更新を無視する。
         const auto refreshSelected = [this](const QUuid &id) { if (id == m_editId) refresh(); };
@@ -344,6 +346,17 @@ bool ObjectInfoPanel::eventFilter(QObject *watched, QEvent *event)
 {
     // key: このパネルが管理する入力欄かを識別する項目名。
     const QString key = m_edits.key(qobject_cast<QLineEdit*>(watched));
+    if (!key.isEmpty() && event->type() == QEvent::ShortcutOverride && isEnabled()) {
+        // shortcut: 文字の下書きがなければ、文書のUndo／Redoへ渡す標準キー。
+        auto *shortcut = static_cast<QKeyEvent*>(event);
+        // edit: 未確定文字のUndoをすべて戻した後も、文字Redoの分岐を保持する入力欄。
+        auto *edit = m_edits.value(key);
+        // local: 文書より先に処理する文字入力の履歴があるかどうか。
+        const bool local = shortcut->matches(QKeySequence::Undo) ? edit->isUndoAvailable() : edit->isRedoAvailable();
+        if ((shortcut->matches(QKeySequence::Undo) || shortcut->matches(QKeySequence::Redo)) && !edit->isModified() && !local) {
+            event->ignore(); return true;
+        }
+    }
     if (!key.isEmpty() && event->type() == QEvent::KeyPress && isEnabled()) {
         // press: Enter・Escを判定する、Qt所有のキーイベント。
         auto *press = static_cast<QKeyEvent*>(event);

@@ -162,6 +162,14 @@ int main(int argc, char **argv)
             auto *edit = w.findChild<QLineEdit*>("edit_vertexX"); edit->setText("invalid"); edit->setModified(true);
             w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
         }
+        if (scenario == "history") {
+            // view: 未使用のRedo分岐と確定済み履歴を保持したまま破棄するビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 作成・編集・削除の履歴へ記録する円のUUID。
+            const auto id = view->document()->addShape(CircleGeometry{{0,0},10});
+            view->document()->setCircleRadius(id,20); view->document()->removeShapes({id});
+            view->document()->undo(); view->selectionModel()->selectOnly(id);
+        }
         if (!w.close()) app.exit(6);
     });
     // コールバック: 正常に終了しない場合は5秒で異常終了し、テストの停止を検出する。

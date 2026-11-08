@@ -92,6 +92,10 @@ private:
     QTabWidget *m_tabs;
     // m_scaleAction: 作業領域の縮尺設定を開くアクション。
     QAction *m_scaleAction;
+    // m_undoAction: 編集メニューと表示バーで共有する、文書操作を戻すアクション。
+    QAction *m_undoAction;
+    // m_redoAction: 戻した文書操作をやり直す共有アクション。
+    QAction *m_redoAction;
     // m_importPdfAction: PDFの選択・取り込みを開始するアクション。
     QAction *m_importPdfAction;
     // m_calibratePdfAction: PDF距離補正ダイアログを開くアクション。

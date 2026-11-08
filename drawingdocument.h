@@ -10,6 +10,8 @@
 #include <QObject>
 #include <QList>
 #include <optional>
+class QUndoStack;
+class DocumentEditCommand;
 
 // Owns committed CAD data without depending on a scene or widget. DrawingView
 // owns only its rendering items and temporary interaction previews.
@@ -19,7 +21,9 @@ class DrawingDocument : public QObject {
 public:
     /// @brief 親QObjectを設定して、空の図形モデルを作る。
     /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
-    explicit DrawingDocument(QObject *parent = nullptr) : QObject(parent) {}
+    explicit DrawingDocument(QObject *parent = nullptr);
+    /// @brief 保持する履歴コマンドを文書の図形より先に解放する。
+    ~DrawingDocument() override;
     /// @brief 描画順に並んだ確定済み図形を読み取り専用で参照する。
     const QList<ShapeData> &shapes() const { return m_shapes; }
     /// @brief IDに対応する図形のコピーを返す。存在しない場合は空のoptionalを返す。
@@ -58,7 +62,20 @@ public:
     /// @param candidate 更新する実寸形状と属性のコピー。UUIDと描画順は維持する。
     bool updateShape(const ShapeData &candidate);
 
+    /// @brief 戻せる確定済み操作があるかどうかを返す。
+    bool canUndo() const;
+    /// @brief やり直せる確定済み操作があるかどうかを返す。
+    bool canRedo() const;
+    /// @brief 直前の確定操作を戻す。履歴なし・再入時はfalseで変更しない。
+    bool undo();
+    /// @brief 戻した操作をやり直す。履歴なし・再入時はfalseで変更しない。
+    bool redo();
+
 signals:
+    /// @brief 履歴の可否が変わったときに通知する。メニューと表示バーは同じ履歴を参照する。
+    void historyChanged();
+    /// @brief Undo／Redoの直前に未確定の描画・入力を破棄するために通知する。
+    void historyAboutToRestore();
     /// @brief 有効な変更の直前を通知し、ビューの未確定操作を取り消せるようにする。
     void aboutToChange();
     /// @brief 追加された図形IDを通知する。
@@ -72,6 +89,14 @@ signals:
     void shapeRemoved(const QUuid &id);
 
 private:
+    friend class DocumentEditCommand;
+    /// @brief 有効な候補リストの差分を1操作として履歴へ追加し、表示へ通知する。
+    /// @param next 描画順に並ぶ検証済みの確定候補。文書のUUIDは一意。
+    /// @param text 操作を識別する日本語名。
+    bool commit(const QList<ShapeData> &next, const QString &text);
+    // m_history: 文書が所有する差分コマンドの履歴。外部には直接公開しない。
+    QUndoStack *m_history;
+
     // m_shapes: モデルが値として所有する確定図形。描画・重なり順を保持する。
     QList<ShapeData> m_shapes; // In drawing/stacking order.
     // m_mutating: モデルの変更通知中に入れ子の変更を受け付けないための再入防止フラグ。

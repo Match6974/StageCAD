@@ -7,6 +7,7 @@
 #include "ui_mainwindow.h"
 #include "drawingsettings.h"
 #include "drawingview.h"
+#include "drawingdocument.h"
 #include "shapeselectionmodel.h"
 #include "objectinfopanel.h"
 #include "scaledialog.h"
@@ -34,6 +35,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolBar>
+#include <QKeySequence>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -93,6 +95,20 @@ MainWindow::MainWindow(QWidget *parent)
     toolbar->setObjectName("drawingToolbar");
     toolbar->setMovable(false);
     toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    // editMenu: 標準ショートカットと同じ履歴を操作する編集メニュー。
+    auto *editMenu = menuBar()->addMenu(tr("編集"));
+    m_undoAction = new QAction(style()->standardIcon(QStyle::SP_ArrowBack),tr("取り消し"),this);
+    m_redoAction = new QAction(style()->standardIcon(QStyle::SP_ArrowForward),tr("やり直し"),this);
+    m_undoAction->setObjectName("undoAction"); m_redoAction->setObjectName("redoAction");
+    m_undoAction->setShortcuts(QKeySequence::keyBindings(QKeySequence::Undo));
+    m_redoAction->setShortcuts(QKeySequence::keyBindings(QKeySequence::Redo));
+    editMenu->addAction(m_undoAction); editMenu->addAction(m_redoAction);
+    toolbar->addAction(m_undoAction); toolbar->addAction(m_redoAction); toolbar->addSeparator();
+    // コールバック: 利用可能な場合だけ文書の確定操作を1件戻す。
+    connect(m_undoAction,&QAction::triggered,this,[this] { m_drawingView->document()->undo(); });
+    // コールバック: 利用可能な場合だけ戻した操作を1件やり直す。
+    connect(m_redoAction,&QAction::triggered,this,[this] { m_drawingView->document()->redo(); });
+    connect(m_drawingView->document(),&DrawingDocument::historyChanged,this,&MainWindow::updatePdfActions);
     m_importPdfAction = toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("PDF取り込み…"));
     m_importPdfAction->setObjectName("importPdfAction");
     m_importPdfAction->setToolTip(tr("現在のPDFを置き換えて作業領域に取り込みます。元のPDFファイルは変更しません。"));
@@ -432,6 +448,8 @@ void MainWindow::updatePdfActions()
     updateDrawingControls();
     m_toolPalette->setEnabled(idle && workspace);
     m_toolOptionsToolbar->setEnabled(idle && workspace);
+    m_undoAction->setEnabled(idle && workspace && m_drawingView->document()->canUndo());
+    m_redoAction->setEnabled(idle && workspace && m_drawingView->document()->canRedo());
     m_importPdfAction->setEnabled(idle);
     m_calibratePdfAction->setEnabled(idle && workspace && m_pdfPlacement->hasPage());
     m_scaleAction->setEnabled(idle && workspace);

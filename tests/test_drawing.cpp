@@ -275,7 +275,7 @@ private slots:
         QList<QPair<QString,QString>> edits;
         if (initial.kind() == ShapeKind::Line) edits = {{"length","60"},{"angle","45"},{"startX","-25"},{"endY","50"}};
         else if (initial.kind() == ShapeKind::Rectangle) edits = {{"width","60"},{"height","40"},{"rectangleAngle","60"},{"originX","25"},{"originY","-20"}};
-        else if (initial.kind() == ShapeKind::Circle) edits = {{"centerX","-20"},{"centerY","10"},{"diameter","60"},{"radius","25"},{"arcStart","30"},{"arcSweep",kind == "arc" ? "150" : "360"}};
+        else if (initial.kind() == ShapeKind::Circle) edits = {{"centerX","-20"},{"centerY","15"},{"diameter","60"},{"radius","25"},{"arcStart","30"},{"arcSweep","150"}};
         else edits = {{"width","60"},{"height","45"},{"originX","-20"},{"originY","-10"},{"vertexX","-15"},{"vertexY","-5"}};
         // edit: 各項目をEnterで確定し、その直後の表示を検査する入力。
         for (const auto &edit : edits) {
@@ -340,6 +340,106 @@ private slots:
         view.selectionModel()->clear(); QVERIFY(coordinate->text().isEmpty());
         QVERIFY(view.selectionModel()->selectOnly(id)); QVERIFY(!coordinate->text().isEmpty());
         QVERIFY(document->removeShapes({id})); QVERIFY(view.shapeItems().isEmpty()); QVERIFY(coordinate->text().isEmpty());
+    }
+    /// @brief Undoが作成途中・移動途中を取り消して、表示と確定値だけを復元する。
+    void historyCancelsPreviews() {
+        // settings: CAD表示の座標設定。
+        DrawingSettings settings;
+        // view: モデルの復元通知から一時操作を破棄するビュー。
+        DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        // document: 作成・移動の2操作を記録する文書。
+        auto *document = view.document();
+        // id: 同じUUIDで履歴を移動する対象の線。
+        const auto id = document->addShape(QLineF(-40,-10,0,-10));
+        QVERIFY(view.selectionModel()->selectOnly(id)); QVERIFY(document->translateShapes({id},{10,0}));
+        view.setActiveTool(DrawingTool::Line); QVERIFY(view.submitDrawingPoint({-20,-20})); QCOMPARE(view.draftPointCount(),1);
+        QVERIFY(document->undo()); QCOMPARE(view.draftPointCount(),0); QCOMPARE(document->shape(id)->positionMm,QPointF());
+        QVERIFY(document->redo()); view.setActiveTool(DrawingTool::Selection);
+        // start: 移動済み線上のドラッグ開始位置（px）。end: 移動プレビューの終点（px）。
+        const QPoint start = view.mapFromScene({-10,-10}), end = start+QPoint(30,-20);
+        QTest::mousePress(view.viewport(),Qt::LeftButton,Qt::NoModifier,start);
+        // move: モデル未確定の一時移動を開始するマウスイベント。
+        QMouseEvent move(QEvent::MouseMove,end,view.viewport()->mapToGlobal(end),Qt::NoButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(),&move);
+        QVERIFY(view.shapeItems().first()->pos() != document->shape(id)->positionMm);
+        QVERIFY(document->undo()); QCOMPARE(view.shapeItems().first()->pos(),QPointF());
+        QCOMPARE(document->shape(id)->positionMm,QPointF());
+        QTest::mouseRelease(view.viewport(),Qt::LeftButton,Qt::NoModifier,end);
+        QCOMPARE(document->shape(id)->positionMm,QPointF());
+        QVERIFY(document->undo()); QVERIFY(view.shapeItems().isEmpty());
+        QVERIFY(document->redo()); QCOMPARE(document->shapes().first().id,id); QCOMPARE(view.shapeItems().size(),1);
+    }
+    /// @brief メニュー・表示バー・標準キーの履歴と、数値欄・表示・選択の復元を検証する。
+    void undoRedoWindowIntegration() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        // startup: 起動時のPDF選択を閉じるタイマー。
+        QTimer startup;
+        // コールバック: 空の図面で文書履歴を検証する。
+        connect(&startup,&QTimer::timeout,[] {
+            // widget: 起動中のトップレベル画面。
+            for (auto *widget : QApplication::topLevelWidgets())
+                // dialog: 起動時にだけ閉じるファイル選択画面。
+                if (auto *dialog = qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+        });
+        startup.start(20);
+        // window: 履歴UIと図形を統合するメイン画面。
+        MainWindow window; startup.stop(); window.show(); window.activateWindow(); QTest::qWait(10);
+        // view: 文書と表示アイテムの所有者。
+        auto *view = window.findChild<DrawingView*>();
+        // document: 同じ履歴を参照する正本モデル。
+        auto *document = view->document();
+        // undo: メニューと表示バーで共有する取り消しアクション。
+        auto *undo = window.findChild<QAction*>("undoAction");
+        // redo: 同じ文書のやり直しアクション。
+        auto *redo = window.findChild<QAction*>("redoAction");
+        QVERIFY(undo && redo); QVERIFY(!undo->isEnabled()); QVERIFY(!redo->isEnabled());
+        // line: 描画順先頭の図形。rectangle: 復元時に中間へ戻す図形。circle: 末尾の図形。
+        const auto line = document->addShape(QLineF(-20,0,20,0));
+        const auto rectangle = document->addShape(QRectF(-30,-20,60,40));
+        const auto circle = document->addShape(CircleGeometry{{80,0},10});
+        QVERIFY(view->selectionModel()->selectOnly(rectangle));
+        // width: Enter確定・不正値拒否・文字Undoを確認する数値欄。
+        auto *width = window.findChild<QLineEdit*>("edit_width");
+        width->setFocus(); width->selectAll(); QTest::keyClicks(width,"100"); QTest::keyClick(width,Qt::Key_Return);
+        QCOMPARE(width->text(),QString("100")); QVERIFY(undo->isEnabled()); QVERIFY(!redo->isEnabled());
+        undo->trigger(); QCOMPARE(width->text(),QString("60")); QVERIFY(redo->isEnabled());
+        QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
+        width->setFocus(); width->selectAll(); QTest::keyClicks(width,"0"); QTest::keyClick(width,Qt::Key_Return);
+        QCOMPARE(std::get<QRectF>(document->shape(rectangle)->geometryMm).width(),60.0); QVERIFY(redo->isEnabled());
+        QTest::keyClick(width,Qt::Key_Escape);
+        // noChange: 同じ値の再確定では履歴・Redo分岐を変えないことの監視。
+        QSignalSpy noChange(document,&DrawingDocument::historyChanged);
+        width->setFocus(); width->selectAll(); QTest::keyClicks(width,"60"); QTest::keyClick(width,Qt::Key_Return);
+        QCOMPARE(noChange.count(),0); QVERIFY(redo->isEnabled());
+        // textHistory: 入力途中の文字Undoで文書履歴を進めないことの監視。
+        QSignalSpy textHistory(document,&DrawingDocument::historyChanged);
+        width->setFocus(); width->selectAll(); QTest::keyClicks(width,"77"); QTest::keyClick(width,Qt::Key_Z,Qt::ControlModifier);
+        QCOMPARE(textHistory.count(),0); QVERIFY(document->shape(circle)); QVERIFY(width->text() != "77");
+        QTest::keyClick(width,Qt::Key_Z,Qt::ControlModifier|Qt::ShiftModifier);
+        QCOMPARE(width->text(),QString("77")); QCOMPARE(textHistory.count(),0);
+        QCOMPARE(std::get<QRectF>(document->shape(rectangle)->geometryMm).width(),60.0); QVERIFY(document->canRedo());
+        QTest::keyClick(width,Qt::Key_Escape); redo->trigger(); QCOMPARE(width->text(),QString("100"));
+        width->setFocus(); QVERIFY(!width->isModified());
+        QTest::keyClick(width,Qt::Key_Z,Qt::ControlModifier); QCOMPARE(width->text(),QString("60"));
+        QVERIFY(document->canRedo());
+        // PDF参照・PDF補正中は文書の履歴操作を無効にする。
+        QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
+        window.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(1); QVERIFY(!undo->isEnabled()); QVERIFY(!redo->isEnabled());
+        window.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0); QVERIFY(undo->isEnabled()); QVERIFY(redo->isEnabled());
+        window.findChild<QAction*>("calibratePdfAction")->trigger(); QVERIFY(!undo->isEnabled());
+        window.findChild<PdfCalibrationDialog*>()->reject(); QVERIFY(undo->isEnabled());
+        // 削除を取り消して元の描画順とヒット判定の手前・奥を復元する。
+        QVERIFY(document->removeShapes({line,rectangle})); undo->trigger();
+        QCOMPARE(view->shapeItems().size(),3);
+        QVERIFY(qgraphicsitem_cast<QGraphicsLineItem*>(view->shapeItems()[0]));
+        QVERIFY(qgraphicsitem_cast<QGraphicsRectItem*>(view->shapeItems()[1]));
+        QVERIFY(qgraphicsitem_cast<QGraphicsEllipseItem*>(view->shapeItems()[2]));
+        QVERIFY(view->shapeItems()[0]->zValue()<view->shapeItems()[1]->zValue());
+        view->setActiveTool(DrawingTool::Selection);
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({0,0}));
+        QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
+        QVERIFY(document->shape(circle));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-undo-redo.png"));
     }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {
