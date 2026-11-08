@@ -1,6 +1,6 @@
 /**
  * @file drawingdocument.h
- * @brief 確定済み図形のID・描画順と、追加・移動・削除の変更通知を管理する。
+ * @brief 確定済み図形のID・描画順と、追加・形状更新・移動・削除の変更通知を管理する。
  */
 
 #ifndef DRAWINGDOCUMENT_H
@@ -39,6 +39,11 @@ public:
     /// @brief 存在を全件確認して図形を削除する。重複IDは1回だけ処理する。
     /// @param ids 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
     bool removeShapes(const QList<QUuid> &ids);
+    /// @brief 直線の両端を実寸座標で更新する。ID・描画順は保ち、不正値では変更しない。
+    /// 同じ実寸形状なら通知しない。更新時は形状を実寸座標へ統合し、配置移動量を0にする。
+    /// @param id 更新対象の直線UUID。他の種類や存在しないIDは拒否する。
+    /// @param lineMm 始点・終点を用紙中心基準の実寸mmで表した線分。
+    bool setLineEndpoints(const QUuid &id, const QLineF &lineMm);
 
 signals:
     /// @brief 有効な変更の直前を通知し、ビューの未確定操作を取り消せるようにする。
@@ -46,7 +51,7 @@ signals:
     /// @brief 追加された図形IDを通知する。
     /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void shapeAdded(const QUuid &id);
-    /// @brief 移動を反映済みの図形IDを通知する。通知時は一括処理の全データが更新済み。
+    /// @brief 形状・配置を反映済みの図形IDを通知する。一括処理では全データの更新後に通知する。
     /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     void shapeChanged(const QUuid &id);
     /// @brief 削除された図形IDを通知する。

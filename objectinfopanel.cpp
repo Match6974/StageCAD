@@ -11,11 +11,25 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QLocale>
+#include <QLineEdit>
+#include <QDoubleValidator>
+#include <QKeyEvent>
+#include <limits>
 #include <cmath>
 
 namespace {
 // DisplayPrecision: 既存の座標入力と揃える表示桁数。末尾の0は表示時に省く。
 constexpr int DisplayPrecision = 6;
+// Pi: 直線の角度表示・編集でラジアンと度を換算する円周率。
+constexpr double Pi = 3.14159265358979323846;
+/// @brief +X基準・反時計回りの直線角度を0〜360度で返す。
+/// @param line 配置に依存しない方向を持つ実寸線分。
+double lineAngle(const QLineF &line)
+{
+    // angle: atan2で求めた、正規化前の角度（度）。
+    const double angle = std::atan2(line.dy(), line.dx()) * 180 / Pi;
+    return angle < 0 ? angle + 360 : angle;
+}
 /// @brief ロケールに合わせて数値を表示し、不要な小数部と負のゼロを除く。
 /// @param value 表示する実寸値または角度。モデルの値自体は丸めない。
 QString number(double value)
@@ -36,7 +50,7 @@ QString number(double value)
 QString millimeters(double value) { return number(value) + QStringLiteral(" mm"); }
 }
 
-/// @brief 読み取り専用の形状行を作り、モデルの選択・形状・寿命の変更に接続する。
+/// @brief 形状表示と直線の編集欄を作り、モデルの選択・形状・寿命の変更に接続する。
 /// @param document 参照先の図形文書。パネルは所有しない。
 /// @param selection 参照先の選択モデル。パネルは所有しない。
 /// @param parent このパネルを所有するQtの親。
@@ -57,15 +71,23 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
     auto *contentLayout = new QVBoxLayout(content);
     m_shapeGroup = new QGroupBox(tr("形状"), content);
     m_form = new QFormLayout(m_shapeGroup); m_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
-    addField("startX", tr("始点 X")); addField("startY", tr("始点 Y"));
-    addField("endX", tr("終点 X")); addField("endY", tr("終点 Y"));
-    addField("length", tr("長さ")); addField("angle", tr("角度"));
     addField("originX", tr("左下 X")); addField("originY", tr("左下 Y"));
     addField("width", tr("幅")); addField("height", tr("高さ"));
     addField("centerX", tr("中心 X")); addField("centerY", tr("中心 Y"));
     addField("radius", tr("半径")); addField("diameter", tr("直径")); addField("vertices", tr("頂点数"));
-    m_values.value("angle")->setToolTip(tr("X軸の正方向を0°とした反時計回りの角度です。"));
     contentLayout->addWidget(m_shapeGroup);
+    m_lineGroup = new QGroupBox(tr("形状"), content);
+    m_lineForm = new QFormLayout(m_lineGroup); m_lineForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    addLineEditor("startX", tr("始点 X (mm)")); addLineEditor("startY", tr("始点 Y (mm)"));
+    addLineEditor("endX", tr("終点 X (mm)")); addLineEditor("endY", tr("終点 Y (mm)"));
+    addLineEditor("length", tr("長さ (mm)")); addLineEditor("angle", tr("角度 (°)"));
+    m_lineEdits.value("angle")->setToolTip(tr("+X方向を0°とした反時計回りの角度。始点を固定して変更します。"));
+    contentLayout->addWidget(m_lineGroup);
+    // hint: 各入力の確定・取消と、固定点を説明する直線グループ所有のラベル。
+    auto *hint = new QLabel(tr("各項目はEnterで確定、Escで取消。\n長さ・角度の変更では始点を固定します。"), m_lineGroup);
+    hint->setWordWrap(true); m_lineForm->addRow(hint);
+    m_error = new QLabel(content); m_error->setObjectName("lineEditError"); m_error->setWordWrap(true);
+    contentLayout->addWidget(m_error);
     // units: 表示単位と座標原点を説明する、コンテナ所有のラベル。
     auto *units = new QLabel(tr("座標・長さは実寸mmです。\n原点は用紙中心、右が+X、上が+Yです。"), content);
     units->setWordWrap(true); contentLayout->addWidget(units); contentLayout->addStretch();
@@ -116,9 +138,14 @@ void ObjectInfoPanel::refresh()
 {
     // value: 以前の図形から値が残らないよう消去する、グループ所有のラベル。
     for (auto *value : m_values) { value->clear(); m_form->setRowVisible(value, false); }
+    m_error->clear(); m_lineId = {};
+    // edit: 以前の線の下書きを破棄する、直線グループ所有の入力欄。
+    for (auto *edit : m_lineEdits) { edit->clear(); edit->setModified(false); }
     // single: 単独選択時に取得する値データ。表示のためにモデルを変更しない。
     const auto single = m_document && m_selection ? m_selection->singleShape() : std::nullopt;
-    m_shapeGroup->setVisible(single.has_value());
+    // isLine: 単独選択した直線には数値編集を、それ以外の形状には情報表示を使う。
+    const bool isLine = single && single->kind() == ShapeKind::Line;
+    m_shapeGroup->setVisible(single.has_value() && !isLine); m_lineGroup->setVisible(isLine);
     if (!single) {
         // count: 有効な選択図形数。文書がない場合は未選択として扱う。
         const int count = m_document && m_selection ? m_selection->count() : 0;
@@ -133,19 +160,22 @@ void ObjectInfoPanel::refresh()
         m_summary->setText(tr("直線"));
         // line: 2端点のローカル実寸形状。配置移動量は別に加える。
         const auto line = std::get<QLineF>(single->geometryMm);
-        showField("startX", millimeters(line.p1().x() + offset.x()));
-        showField("startY", millimeters(line.p1().y() + offset.y()));
-        showField("endX", millimeters(line.p2().x() + offset.x()));
-        showField("endY", millimeters(line.p2().y() + offset.y()));
-        showField("length", millimeters(line.length()));
-        // Pi: ラジアンを度へ換算する円周率。
-        constexpr double Pi = 3.14159265358979323846;
-        // angle: +X基準・反時計回りの角度を0〜360度へ正規化する表示用の値。
-        double angle = std::atan2(line.dy(), line.dx()) * 180 / Pi;
-        if (angle < 0) angle += 360;
-        // shownAngle: 表示桁への丸めで360度となる場合だけ、同方向の0度に戻す文字列。
-        const QString shownAngle = number(angle) == number(360) ? number(0) : number(angle);
-        showField("angle", shownAngle + QStringLiteral("°"));
+        m_lineId = single->id;
+        // world: 配置移動量を反映した、用紙中心基準の実寸端点（mm）。
+        const QLineF world = line.translated(offset);
+        // values: 直線6項目の表示値。角度だけ度、それ以外は実寸mm。
+        const QHash<QString,double> values{{"startX",world.x1()},{"startY",world.y1()},
+            {"endX",world.x2()},{"endY",world.y2()},{"length",world.length()},{"angle",lineAngle(world)}};
+        // it: 数値を対応する入力欄へ反映する項目走査。
+        for (auto it = values.cbegin(); it != values.cend(); ++it) {
+            // edit: 対象項目の入力欄。プログラム反映で変更済み状態にはしない。
+            auto *edit = m_lineEdits.value(it.key());
+            // locale: 表示値と一致させる、桁区切りを拒否する入力ロケール。
+            QLocale locale; locale.setNumberOptions(QLocale::RejectGroupSeparator | QLocale::OmitGroupSeparator);
+            edit->findChild<QDoubleValidator*>()->setLocale(locale);
+            edit->setText(number(it.key() == "angle" && number(it.value()) == number(360) ? 0 : it.value()));
+            edit->setModified(false);
+        }
         break;
     }
     case ShapeKind::Circle: {
@@ -169,4 +199,97 @@ void ObjectInfoPanel::refresh()
         break;
     }
     }
+}
+
+/// @brief 各直線項目を数値入力として登録し、個別確定のキー操作を監視する。
+/// @param key 入力の内部識別名。
+/// @param title 単位を含む項目名。
+void ObjectInfoPanel::addLineEditor(const QString &key, const QString &title)
+{
+    // edit: 直線グループが所有する、1項目の下書き入力欄。
+    auto *edit = new QLineEdit(m_lineGroup); edit->setObjectName("edit_" + key);
+    // bound: 座標以外も有限の数値として検証するための上限。
+    const double bound = std::numeric_limits<double>::max();
+    // validator: 小数6桁・通常表記で入力を検証する、入力欄所有のバリデータ。
+    auto *validator = new QDoubleValidator(key == "length" ? 0 : -bound, bound, DisplayPrecision, edit);
+    if (key != "length" && key != "angle") validator->setRange(-ShapeData::CoordinateLimitMm, ShapeData::CoordinateLimitMm, DisplayPrecision);
+    validator->setNotation(QDoubleValidator::StandardNotation); edit->setValidator(validator);
+    edit->installEventFilter(this); m_lineForm->addRow(title, edit); m_lineEdits.insert(key,edit);
+}
+
+/// @brief 入力欄のEnterで1項目を確定し、Escでは未確定入力だけを戻す。
+/// @param watched キー入力を監視するQtオブジェクト。
+/// @param event 受け取ったイベント。処理したキーはここで受理する。
+bool ObjectInfoPanel::eventFilter(QObject *watched, QEvent *event)
+{
+    // key: このパネルが管理する入力欄かを識別する項目名。
+    const QString key = m_lineEdits.key(qobject_cast<QLineEdit*>(watched));
+    if (!key.isEmpty() && event->type() == QEvent::KeyPress && isEnabled()) {
+        // press: Enter・Escを判定する、Qt所有のキーイベント。
+        auto *press = static_cast<QKeyEvent*>(event);
+        if (press->key() == Qt::Key_Escape) { refresh(); event->accept(); return true; }
+        if (press->key() == Qt::Key_Return || press->key() == Qt::Key_Enter) {
+            commitLineField(key); event->accept(); return true;
+        }
+    }
+    return QWidget::eventFilter(watched,event);
+}
+
+/// @brief PDF参照・補正等による無効化で、未確定の数値を破棄する。
+/// @param event Qtから渡される有効状態等の変更イベント。
+void ObjectInfoPanel::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::EnabledChange && !isEnabled()) refresh();
+    QWidget::changeEvent(event);
+}
+
+/// @brief 1つの入力だけを最新の直線へ反映し、不正値では入力とモデルを保持する。
+/// @param key 確定する項目名。長さ・角度は始点を固定して終点を動かす。
+void ObjectInfoPanel::commitLineField(const QString &key)
+{
+    if (!isEnabled() || !m_document || !m_selection) return;
+    // single: Enter時点の単独選択を再取得し、別図形へ古い入力が適用されるのを防ぐ。
+    const auto single = m_selection->singleShape();
+    if (!single || single->id != m_lineId || single->kind() != ShapeKind::Line) { refresh(); return; }
+    // edit: 今回確定する1項目の入力欄。
+    auto *edit = m_lineEdits.value(key);
+    if (!edit || !edit->isModified()) return;
+    // valid: 入力表記と有限値の変換がどちらも成立したかどうか。
+    bool valid = false;
+    // value: 項目の入力値。角度は度、それ以外は実寸mm。
+    const double value = edit->findChild<QDoubleValidator*>()->locale().toDouble(edit->text(), &valid);
+    if (!valid || !std::isfinite(value) || !edit->hasAcceptableInput()) {
+        m_error->setText(tr("入力値が範囲外、または数値として不正です。小数点以下6桁までで指定してください。")); return;
+    }
+    // line: 現在の確定済み形状を実寸の端点へ変換した更新候補。
+    QLineF line = std::get<QLineF>(single->geometryMm).translated(single->positionMm);
+    // first: 座標編集では対象成分だけを更新し、長さ・角度編集では固定する始点（実寸mm）。
+    QPointF first = line.p1();
+    // second: 更新候補の終点（実寸mm）。未編集成分には丸めた表示値を使わない。
+    QPointF second = line.p2();
+    if (key == "startX") first.setX(value);
+    else if (key == "startY") first.setY(value);
+    else if (key == "endX") second.setX(value);
+    else if (key == "endY") second.setY(value);
+    else if (key == "length") {
+        if (value <= 0) { m_error->setText(tr("長さは0より大きい値を指定してください。")); return; }
+        // 先に単位方向へ変換し、極端に短い元の線でも倍率の計算をオーバーフローさせない。
+        second = first + ((second - first) / line.length()) * value;
+    } else if (key == "angle") {
+        // degrees: 大きい角度入力でも三角関数の精度を保つ、正規化した角度（度）。
+        double degrees = std::fmod(value,360); if (degrees < 0) degrees += 360;
+        // direction: 端点更新に使う単位方向。軸方向では微小な計算ずれを残さない。
+        QPointF direction;
+        if (degrees == 0) direction = {1,0};
+        else if (degrees == 90) direction = {0,1};
+        else if (degrees == 180) direction = {-1,0};
+        else if (degrees == 270) direction = {0,-1};
+        else direction = {std::cos(degrees*Pi/180),std::sin(degrees*Pi/180)};
+        second = first + direction * line.length();
+    } else return;
+    line.setP1(first); line.setP2(second);
+    if (!m_document->setLineEndpoints(single->id,line)) {
+        m_error->setText(tr("長さが0になる変更、または座標が±10000000mmを超える変更は適用できません。")); return;
+    }
+    refresh();
 }

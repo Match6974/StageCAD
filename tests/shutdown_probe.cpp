@@ -118,6 +118,17 @@ int main(int argc, char **argv)
             auto *dock = w.findChild<QDockWidget*>("objectInfoDock");
             if (scenario == "floating-object-info") dock->setFloating(true); else dock->close();
         }
+        if (scenario == "editing-line") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 直線と選択状態を所有するビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 編集途中でも確定形状を保ったまま閉じる対象の直線UUID。
+            const auto id = view->document()->addShape(QLineF(0,0,100,0));
+            view->selectionModel()->selectOnly(id);
+            // edit: 未確定の不正値を残して閉じる、パネル所有の入力欄。
+            auto *edit = w.findChild<QLineEdit*>("edit_endX");
+            edit->setText("invalid"); edit->setModified(true); edit->setFocus();
+        }
         if (!w.close()) app.exit(6);
     });
     // コールバック: 正常に終了しない場合は5秒で異常終了し、テストの停止を検出する。

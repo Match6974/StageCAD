@@ -19,6 +19,7 @@
 #include <QSignalSpy>
 #include "pdfcalibrationdialog.h"
 #include <QDoubleSpinBox>
+#include <QLineEdit>
 #include <QFileDialog>
 #include <QGraphicsLineItem>
 #include <QGraphicsEllipseItem>
@@ -34,6 +35,54 @@
 class DrawingTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief パネルでの直線編集が、同じUUIDの表示・選択判定へ反映されることを検証する。
+    void linePropertiesUpdateCanvas() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        // startup: 起動時のファイル選択を閉じる自動応答タイマー。
+        QTimer startup;
+        // コールバック: テストでは起動時のPDFを選ばず、空の作業領域を開く。
+        connect(&startup,&QTimer::timeout,[] {
+            // widget: 起動中のトップレベル画面。所有権は取得しない。
+            for (auto *widget : QApplication::topLevelWidgets())
+                // dialog: 表示中のファイル選択ダイアログ。
+                if (auto *dialog = qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+        });
+        startup.start(20);
+        // window: パネル・文書・ビューを統合して操作するメイン画面。
+        MainWindow window; startup.stop(); window.show(); QTest::qWait(10);
+        // view: 図形モデルを所有し、編集後の形状を描画するCADビュー。
+        auto *view = window.findChild<DrawingView*>();
+        // info: 直線の編集欄を所有するプロパティパネル。
+        auto *info = window.findChild<ObjectInfoPanel*>(); QVERIFY(view && info);
+        // id: 編集前後で選択を維持する直線のUUID。
+        const auto id = view->document()->addShape(QLineF(-30,-20,30,-20));
+        QVERIFY(view->document()->translateShapes({id},{10,5})); QVERIFY(view->selectionModel()->selectOnly(id));
+        // item: 形状変更でも作り直されない、シーン所有の直線アイテム。
+        auto *item = qgraphicsitem_cast<QGraphicsLineItem*>(view->shapeItems().first()); QVERIFY(item);
+        // length: 始点を固定して長さを変更する数値入力欄。
+        auto *length = info->findChild<QLineEdit*>("edit_length"); QVERIFY(length);
+        length->setFocus(); length->selectAll(); QTest::keyClicks(length,"120"); QTest::keyClick(length,Qt::Key_Return);
+        QCOMPARE(item->line(),QLineF(-20,-15,100,-15)); QCOMPARE(item->pos(),QPointF());
+        // angle: 長さと始点を保って角度を変更する数値入力欄。
+        auto *angle = info->findChild<QLineEdit*>("edit_angle"); QVERIFY(angle);
+        angle->setFocus(); angle->selectAll(); QTest::keyClicks(angle,"90"); QTest::keyClick(angle,Qt::Key_Return);
+        QCOMPARE(item->line(),QLineF(-20,-15,-20,105)); QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({id}));
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({10,-15}));
+        QVERIFY(view->selectedShapeItems().isEmpty());
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({-20,45}));
+        QCOMPARE(view->selectedShapeItems(),QList<QGraphicsItem*>({item}));
+        QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
+        // start: 補正中の無効化で未確定入力が破棄されることを確認する始点X入力欄。
+        auto *start = info->findChild<QLineEdit*>("edit_startX"); QVERIFY(start);
+        start->setText("99"); start->setModified(true);
+        window.findChild<QAction*>("calibratePdfAction")->trigger();
+        QCOMPARE(start->text(),QString("-20")); QVERIFY(!info->isEnabled());
+        window.findChild<PdfCalibrationDialog*>()->reject();
+        QCOMPARE(item->line(),QLineF(-20,-15,-20,105));
+        QVERIFY(view->setDisplayZoom(2)); QCOMPARE(item->line(),QLineF(-20,-15,-20,105));
+        view->resetView();
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-line-editing.png"));
+    }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {
         // settings: 実寸座標と用紙の換算に使う設定モデル。

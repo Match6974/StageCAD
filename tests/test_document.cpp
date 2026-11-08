@@ -12,6 +12,42 @@
 class DocumentTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 直線端点の更新でID・順序を保ち、不正値や同じ値の通知を抑えることを検証する。
+    void lineEndpointUpdates() {
+        // document: 直線の実寸更新を適用するモデル。
+        DrawingDocument document;
+        // line: 移動後の線を編集してもUUIDが変わらないことを確認する対象。
+        const auto line = document.addShape(QLineF(0,0,10,0));
+        // rect: 直線以外を誤って編集しないことを確認する矩形UUID。
+        const auto rect = document.addShape(QRectF(20,20,10,10));
+        QVERIFY(document.translateShapes({line},{100,200}));
+        // changed: 有効な実寸変更だけが1回通知されることを確認する監視。
+        QSignalSpy changed(&document, &DrawingDocument::shapeChanged);
+        // about: 無効値や同じ値ではドラッグ取消などの準備通知も出さないことを確認する。
+        QSignalSpy about(&document, &DrawingDocument::aboutToChange);
+        QVERIFY(document.setLineEndpoints(line, QLineF(100,200,110,200)));
+        QCOMPARE(changed.count(), 0); QCOMPARE(about.count(), 0);
+        QVERIFY(document.setLineEndpoints(line, QLineF(-10,20,30,50)));
+        QCOMPARE(changed.count(), 1); QCOMPARE(about.count(), 1);
+        QCOMPARE(document.shape(line)->positionMm, QPointF());
+        QCOMPARE(std::get<QLineF>(document.shape(line)->geometryMm), QLineF(-10,20,30,50));
+        QCOMPARE(document.shapes()[0].id,line); QCOMPARE(document.shapes()[1].id,rect);
+        QVERIFY(!document.setLineEndpoints(line, QLineF(0,0,0,0)));
+        QVERIFY(!document.setLineEndpoints(line, QLineF(0,0,10000001,0)));
+        QVERIFY(!document.setLineEndpoints(line, QLineF(0,0,std::numeric_limits<double>::quiet_NaN(),0)));
+        QVERIFY(!document.setLineEndpoints(rect, QLineF(0,0,10,10)));
+        QVERIFY(!document.setLineEndpoints(QUuid::createUuid(), QLineF(0,0,10,10)));
+        QCOMPARE(changed.count(), 1); QCOMPARE(about.count(), 1);
+        QCOMPARE(std::get<QLineF>(document.shape(line)->geometryMm), QLineF(-10,20,30,50));
+        // requested: 通知を受けたUIが書き換えることを想定した、呼び出し元側の可変UUID。
+        QUuid requested = line;
+        // コールバック: 文書自体は変更せず、呼び出し元の選択IDだけを切り替える。
+        connect(&document,&DrawingDocument::aboutToChange,&document,[&requested,rect] { requested = rect; });
+        QVERIFY(document.setLineEndpoints(requested,QLineF(1,2,3,4)));
+        QCOMPARE(requested,rect); QCOMPARE(document.shape(rect)->kind(),ShapeKind::Rectangle);
+        QCOMPARE(std::get<QLineF>(document.shape(line)->geometryMm),QLineF(1,2,3,4));
+        QCOMPARE(changed.last().at(0).toUuid(),line);
+    }
     /// @brief 4種類の形状、UUID、移動後の形状維持、コピー、削除後の描画順を検証する。
     void independentDataAndStableIds() {
         // document: 確定済み図形のID・形状・配置を管理する共通モデル。

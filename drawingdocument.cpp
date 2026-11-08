@@ -1,6 +1,6 @@
 /**
  * @file drawingdocument.cpp
- * @brief 確定済み図形のID・描画順と、追加・移動・削除の変更通知を管理する。
+ * @brief 確定済み図形のID・描画順と、追加・形状更新・移動・削除の変更通知を管理する。
  */
 
 #include "drawingdocument.h"
@@ -87,5 +87,32 @@ bool DrawingDocument::removeShapes(const QList<QUuid> &ids)
         [&](const ShapeData &data) { return unique.contains(data.id); }), m_shapes.end());
     // id: 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     for (const auto &id : unique) emit shapeRemoved(id);
+    return true;
+}
+
+/// @brief 実寸の端点を検証して直線を更新する。座標やサイズが不正な場合は形状を維持する。
+/// @param id 変更する直線のUUID。
+/// @param lineMm 配置移動量を反映済みの始点・終点（実寸mm）。
+bool DrawingDocument::setLineEndpoints(const QUuid &id, const QLineF &lineMm)
+{
+    if (m_mutating) return false;
+    // original: 現在の確定データのコピー。種類と変更前の実寸形状を確認する。
+    const auto original = shape(id);
+    if (!original || original->kind() != ShapeKind::Line) return false;
+    // next: 実寸座標に統合した候補形状。配置を0にし、ローカル座標の範囲制限にも合わせる。
+    const ShapeData next{id, lineMm, {}};
+    if (!next.isValid()) return false;
+    // current: 比較用の変更前の両端座標（実寸mm）。
+    const QLineF current = std::get<QLineF>(original->geometryMm).translated(original->positionMm);
+    // 微小な有効変更を失わないよう、座標ごとに厳密比較して無変更だけを除く。
+    if (current.x1() == lineMm.x1() && current.y1() == lineMm.y1()
+        && current.x2() == lineMm.x2() && current.y2() == lineMm.y2()) return true;
+    // mutating: 検証後から通知終了まで、文書の入れ子変更を拒否するガード。
+    QScopedValueRollback<bool> mutating(m_mutating, true);
+    emit aboutToChange();
+    // data: ID・描画順を保って形状と配置だけを置き換える文書内の図形。
+    for (auto &data : m_shapes) if (data.id == next.id) { data = next; break; }
+    // 呼び出し元のIDが通知処理中に変化しても、検証済みの対象UUIDを維持する。
+    emit shapeChanged(next.id);
     return true;
 }

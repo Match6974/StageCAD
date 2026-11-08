@@ -118,7 +118,7 @@ private:
     QString m_pdfPath;
     // m_toolPalette: 基本ドックが所有する、描画・選択ツールのパレット。
     ToolPalette *m_toolPalette;
-    // m_objectInfoPanel: 右側ドックが所有する、選択図形の読み取り専用プロパティ表示。
+    // m_objectInfoPanel: 右側ドックが所有する、選択図形のプロパティ表示と直線の数値編集。
     ObjectInfoPanel *m_objectInfoPanel;
     // m_toolModeLabel: 選択ツールとモードを表示するラベル。親ツールバーが所有する。
     QLabel *m_toolModeLabel;
