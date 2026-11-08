@@ -157,6 +157,7 @@ MainWindow::MainWindow(QWidget *parent)
     infoDock->setObjectName("objectInfoDock"); infoDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     infoDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     m_objectInfoPanel = new ObjectInfoPanel(m_drawingView->document(), m_drawingView->selectionModel(), infoDock);
+    connect(m_objectInfoPanel,&ObjectInfoPanel::vertexHighlighted,m_drawingView,&DrawingView::highlightVertex);
     infoDock->setWidget(m_objectInfoPanel); addDockWidget(Qt::RightDockWidgetArea, infoDock);
     resizeDocks({infoDock}, {260}, Qt::Horizontal);
     viewMenu->addAction(infoDock->toggleViewAction());
@@ -495,5 +496,10 @@ void MainWindow::updateScaleDisplay()
         .arg(realSize.width(), 0, 'g', 15).arg(realSize.height(), 0, 'g', 15));
 }
 
-/// @brief Designer生成のUI補助オブジェクトを解放する。子QObjectはQtの親子関係で破棄される。
-MainWindow::~MainWindow() { delete ui; }
+/// @brief 頂点表示の接続を切り離してUI補助オブジェクトを解放する。子QObjectはQtが破棄する。
+MainWindow::~MainWindow()
+{
+    // 子ビューの派生クラス破棄後にモデル破棄通知から頂点マーカーを操作させない。
+    disconnect(m_objectInfoPanel,nullptr,m_drawingView,nullptr);
+    delete ui;
+}

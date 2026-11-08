@@ -14,6 +14,7 @@
 #include <QGraphicsPolygonItem>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QStyleOptionGraphicsItem>
 #include <QPainterPathStroker>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -29,6 +30,40 @@
 #include <limits>
 
 namespace {
+/// @brief 標準アイテムの型と面描画を維持し、開いた形状だけを閉じずに描画する。シーンが所有する。
+/// @tparam Base 円または多角形の標準描画アイテム。
+template<class Base> class OpenShapeItem : public Base {
+public:
+    /// @brief 開閉状態とローカル実寸パスを同期する。
+    /// @param path 描画する開いたパス（実寸mm）。
+    /// @param open 面を塗らず、終点と始点を結ばないかどうか。
+    void setOpenPath(const QPainterPath &path, bool open) { m_path = path; m_open = open; this->update(); }
+    /// @brief 開いた形状のヒット領域には線幅だけを与える。
+    QPainterPath shape() const override {
+        if (!m_open) return Base::shape();
+        // stroker: 開いた線だけをヒット対象にする生成器。
+        QPainterPathStroker stroker; stroker.setWidth(this->pen().widthF()); return stroker.createStroke(m_path);
+    }
+    /// @brief 真円・閉多角形では標準描画、円弧・開多角形では線だけを描画する。
+    /// @param painter Qtが所有する描画コンテキスト。
+    /// @param option 選択状態などの描画情報。
+    /// @param widget 描画先。所有権は取得しない。
+    void paint(QPainter *painter,const QStyleOptionGraphicsItem *option,QWidget *widget) override {
+        if (!m_open) { Base::paint(painter,option,widget); return; }
+        painter->save(); painter->setPen(this->pen()); painter->setBrush(Qt::NoBrush); painter->drawPath(m_path);
+        if (option->state & QStyle::State_Selected) {
+            // selectionPen: ズームに依存しない選択枠用の画面線幅。
+            QPen selectionPen(Qt::black,0,Qt::DashLine); painter->setPen(selectionPen); painter->drawRect(this->boundingRect());
+        }
+        painter->restore();
+    }
+private:
+    // m_path: 終点と始点を結ばずに描画するローカル実寸形状。
+    QPainterPath m_path;
+    // m_open: 標準の塗りつぶし描画を使わない場合だけtrue。
+    bool m_open = false;
+};
+
 /// @brief 座標の各成分が有限で、実寸mmの許容範囲内にあるかを返す。
 /// @param point 用紙中心基準の実寸座標（mm）。
 bool validPoint(QPointF point) { return ShapeData::validPoint(point); }
@@ -78,6 +113,19 @@ QPen shapePen()
 
 /// @brief 確定した面図形に使う半透明の塗りを返す。
 QBrush shapeBrush() { return QColor(95, 155, 215, 65); }
+}
+
+/// @brief 図面の拡大率に関係なく、選択頂点を小さな丸で示す。
+/// @param point マーカーの実寸座標（mm）。
+/// @param visible マーカーの表示状態。
+void DrawingView::highlightVertex(QPointF point,bool visible)
+{
+    if (!m_vertexMarker) {
+        m_vertexMarker = scene()->addEllipse(-4,-4,8,8,QPen(QColor("#c35100"),1),QBrush(QColor("#ffdf60")));
+        m_vertexMarker->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        m_vertexMarker->setAcceptedMouseButtons(Qt::NoButton); m_vertexMarker->setZValue(1000);
+    }
+    m_vertexMarker->setPos(point); m_vertexMarker->setVisible(visible); viewport()->update();
 }
 
 /// @brief 図形モデル・シーン・用紙を作り、座標表示と入力処理を接続する。
@@ -345,16 +393,27 @@ void DrawingView::syncShape(const QUuid &id)
         const auto circle = std::get<CircleGeometry>(data->geometryMm);
         // radius: 円の外接矩形の対角へ向かう半径ベクトル（実寸mm）。
         const QPointF radius(circle.radiusMm, circle.radiusMm);
-        if (!item) item = scene()->addEllipse({}, shapePen(), shapeBrush());
+        if (!item) {
+            item = new OpenShapeItem<QGraphicsEllipseItem>(); scene()->addItem(item);
+            qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setPen(shapePen());
+            qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setBrush(shapeBrush());
+        }
         qgraphicsitem_cast<QGraphicsEllipseItem*>(item)->setRect(QRectF(circle.centerMm - radius, circle.centerMm + radius));
+        static_cast<OpenShapeItem<QGraphicsEllipseItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
     case ShapeKind::Polygon:
         tool = DrawingTool::Polygon;
-        if (!item) item = scene()->addPolygon({}, shapePen(), shapeBrush());
+        if (!item) {
+            item = new OpenShapeItem<QGraphicsPolygonItem>(); scene()->addItem(item);
+            qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setPen(shapePen());
+            qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setBrush(shapeBrush());
+        }
         qgraphicsitem_cast<QGraphicsPolygonItem*>(item)->setPolygon(std::get<QPolygonF>(data->geometryMm));
+        static_cast<OpenShapeItem<QGraphicsPolygonItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
+    item->setTransform(data->rectangleTransform());
     item->setPos(data->positionMm);
     if (added) {
         item->setFlag(QGraphicsItem::ItemIsSelectable);
@@ -419,9 +478,9 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
         const auto data = m_document->shape(shapeId(item));
         if (!data) continue;
         // path: 実寸形状を画面座標へ変換した選択判定用パス（px）。
-        const QPainterPath path = viewportTransform().map(item->mapToScene(data->localPath()));
+        const QPainterPath path = viewportTransform().map(data->localPath().translated(item->pos()));
         // filled: 選択判定で線の近傍だけでなく面の内部も対象にするかどうか。
-        const bool filled = data->kind() != ShapeKind::Line;
+        const bool filled = data->isFilled();
         if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
     }
     return nullptr;

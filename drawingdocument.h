@@ -54,6 +54,10 @@ public:
     /// @param radiusMm 新しい半径（実寸mm）。有限の正値で、外接範囲も有効な値に限る。
     bool setCircleRadius(const QUuid &id, double radiusMm);
 
+    /// @brief 同じUUID・種類の形状を検証後に一括更新する。不正値・再入は変更せずfalseを返す。
+    /// @param candidate 更新する実寸形状と属性のコピー。UUIDと描画順は維持する。
+    bool updateShape(const ShapeData &candidate);
+
 signals:
     /// @brief 有効な変更の直前を通知し、ビューの未確定操作を取り消せるようにする。
     void aboutToChange();

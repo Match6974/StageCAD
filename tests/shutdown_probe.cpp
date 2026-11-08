@@ -138,11 +138,29 @@ int main(int argc, char **argv)
             // id: 編集対象の確定図形のUUID。
             const auto id = rectangle ? view->document()->addShape(QRectF(0,0,100,50))
                                       : view->document()->addShape(CircleGeometry{{0,0},10});
+            // data: 回転矩形または開いた円弧を、選択・編集したまま終了するための候補。
+            auto data = *view->document()->shape(id);
+            if (rectangle) data.rectangleAngleDeg = 30;
+            else std::get<CircleGeometry>(data.geometryMm).sweepAngleDeg = 120;
+            view->document()->updateShape(data);
             view->selectionModel()->selectOnly(id);
             // edit: 不正な下書きを残して閉じる、パネル所有の寸法入力欄。
             auto *edit = w.findChild<QLineEdit*>(rectangle ? "edit_width" : "edit_radius");
             edit->setText("invalid"); edit->setModified(true); edit->setFocus();
             if (rectangle) w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
+        }
+        if (scenario == "editing-polygon") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            // view: 頂点マーカーと選択を保持したまま終了するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            // id: 開いた形状へ変更して頂点を選択する多角形UUID。
+            const auto id = view->document()->addShape(QPolygonF({{0,0},{100,0},{50,50}}));
+            // data: 開閉状態を変更する候補コピー。
+            auto data = *view->document()->shape(id); data.polygonClosed = false;
+            view->document()->updateShape(data); view->selectionModel()->selectOnly(id);
+            // edit: 未確定の頂点座標を残して閉じる入力欄。
+            auto *edit = w.findChild<QLineEdit*>("edit_vertexX"); edit->setText("invalid"); edit->setModified(true);
+            w.findChild<QDockWidget*>("objectInfoDock")->setFloating(true);
         }
         if (!w.close()) app.exit(6);
     });

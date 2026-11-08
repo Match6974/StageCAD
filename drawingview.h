@@ -15,6 +15,7 @@
 
 class DrawingSettings;
 class DrawingDocument;
+class QGraphicsEllipseItem;
 class ShapeSelectionModel;
 class QMenu;
 class QGraphicsRectItem;
@@ -25,6 +26,10 @@ class DrawingView : public QGraphicsView
 {
     Q_OBJECT
 public:
+    /// @brief 情報パレットで選択した多角形の頂点を画面上に示す。
+    /// @param point 用紙中心基準の実寸座標（mm）。
+    /// @param visible マーカーを表示するかどうか。
+    void highlightVertex(QPointF point, bool visible);
     /// @brief 図形モデル・シーン・用紙を作り、座標表示と入力処理を接続する。
     /// @param settings 作業領域の縮尺・用紙設定。参照先は呼び出し側が管理する。
     /// @param parent Qtの親オブジェクト。親子関係で寿命を管理し、nullptrなら親を設定しない。
@@ -163,6 +168,8 @@ protected:
     void drawForeground(QPainter *painter, const QRectF &rect) override;
 
 private:
+    // m_vertexMarker: 選択頂点を示すシーン所有のマーカー。画面サイズを固定する。
+    QGraphicsEllipseItem *m_vertexMarker = nullptr;
     /// @brief 縮尺に応じて用紙範囲と表示変換を更新する。確定図形の実寸は維持する。
     void updatePaper();
     /// @brief 指定中心を保ち、用紙換算と画面ズームを合わせた表示変換を適用する。

@@ -12,6 +12,44 @@
 class DocumentTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 拡張属性のコピー・範囲検証・再入拒否と型・UUIDの維持を検証する。
+    void propertyUpdatesAreAtomic() {
+        // document: 型と描画順を維持して更新する文書。
+        DrawingDocument document;
+        // id: 基準点・回転を保持する矩形UUID。
+        const auto id = document.addShape(QRectF(0,0,40,20));
+        // candidate: 位置と角度を同時に検証する更新候補。
+        auto candidate = *document.shape(id); candidate.rectangleAngleDeg = 90; candidate.positionMm = {100,200};
+        QVERIFY(document.updateShape(candidate)); QCOMPARE(document.shape(id)->rectangleAngleDeg,90.0);
+        QCOMPARE(document.shape(id)->boundsMm(),QRectF(80,200,20,40));
+        // changes: 拒否した候補では通知しないことを確認する監視。
+        QSignalSpy changes(&document,&DrawingDocument::shapeChanged);
+        candidate.rectangleAngleDeg = std::numeric_limits<double>::infinity(); QVERIFY(!document.updateShape(candidate));
+        candidate = *document.shape(id); candidate.geometryMm = CircleGeometry{{0,0},10}; QVERIFY(!document.updateShape(candidate));
+        candidate = *document.shape(id); candidate.positionMm = {10000000,10000000}; QVERIFY(!document.updateShape(candidate));
+        QCOMPARE(changes.count(),0); QCOMPARE(document.shape(id)->boundsMm(),QRectF(80,200,20,40));
+        // circle: 円弧に必要な開始角と円弧角を保持する円UUID。
+        const auto circle = document.addShape(CircleGeometry{{0,0},10});
+        candidate = *document.shape(circle); std::get<CircleGeometry>(candidate.geometryMm).sweepAngleDeg = 90;
+        QVERIFY(document.updateShape(candidate)); QVERIFY(document.setCircleRadius(circle,20));
+        QCOMPARE(std::get<CircleGeometry>(document.shape(circle)->geometryMm).sweepAngleDeg,90.0);
+        candidate = *document.shape(circle); std::get<CircleGeometry>(candidate.geometryMm).sweepAngleDeg = 361;
+        QVERIFY(!document.updateShape(candidate));
+        // polygon: 開いた形状を2点まで許容し、閉じるときには3点以上を要求する頂点列UUID。
+        const auto polygon = document.addShape(QPolygonF({{0,0},{10,0},{10,10}}));
+        candidate = *document.shape(polygon); candidate.polygonClosed = false;
+        candidate.geometryMm = QPolygonF({{0,0},{10,0}}); QVERIFY(document.updateShape(candidate));
+        candidate.polygonClosed = true; QVERIFY(!document.updateShape(candidate));
+        candidate = *document.shape(polygon); std::get<QPolygonF>(candidate.geometryMm)[0] = {std::numeric_limits<double>::quiet_NaN(),0};
+        QVERIFY(!document.updateShape(candidate));
+        // reentered: 変更通知内の再入更新が拒否されることを検証する結果値。
+        bool reentered = true;
+        // コールバック: 外側の変更が確定する前に、同じ図形の更新を試みる。
+        connect(&document,&DrawingDocument::aboutToChange,&document,[&] { reentered = document.updateShape(*document.shape(id)); });
+        candidate = *document.shape(id); candidate.rectangleAngleDeg = 45;
+        QVERIFY(document.updateShape(candidate)); QVERIFY(!reentered);
+        QCOMPARE(document.shapes()[0].id,id); QCOMPARE(document.shapes()[1].id,circle); QCOMPARE(document.shapes()[2].id,polygon);
+    }
     /// @brief 矩形・円の更新で実寸・種類・IDを維持し、不正値や無変更を通知しないことを検証する。
     void rectangleAndCircleUpdates() {
         // document: 移動済み形状へ寸法更新を適用する文書。

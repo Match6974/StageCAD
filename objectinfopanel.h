@@ -1,6 +1,6 @@
 /**
  * @file objectinfopanel.h
- * @brief 選択モデルと図形文書から、現在の形状情報を表示し、単独選択した直線・四角形・円を実寸で編集する。
+ * @brief 選択モデルと図形文書から、現在の形状情報を表示し、単独選択した直線・四角形・円・多角形を実寸で編集する。
  */
 #ifndef OBJECTINFOPANEL_H
 #define OBJECTINFOPANEL_H
@@ -17,8 +17,9 @@ class QGroupBox;
 class QFormLayout;
 class QLineEdit;
 class RectangleAnchorSelector;
+class QCheckBox;
 
-/// @brief 単独選択図形を表示し、直線・寸法の項目変更を文書へ渡す。参照モデル自体は所有しない。
+/// @brief 単独選択図形を表示し、各種形状の座標・寸法・角度・頂点の変更を文書へ渡す。参照モデル自体は所有しない。
 class ObjectInfoPanel : public QWidget {
     Q_OBJECT
 public:
@@ -29,6 +30,11 @@ public:
     explicit ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel *selection, QWidget *parent = nullptr);
     /// @brief 子ウィジェットの破棄より先に、モデルからの通知を切り離す。
     ~ObjectInfoPanel() override;
+signals:
+    /// @brief 選択頂点を図面上に表示する。非多角形や未選択ではvisible=false。
+    /// @param point 用紙中心基準の実寸座標（mm）。
+    /// @param visible 頂点マーカーを表示するかどうか。
+    void vertexHighlighted(QPointF point, bool visible);
 protected:
     /// @brief Enterで1項目を確定し、Escで未確定入力を戻す。
     /// @param watched 編集用入力欄。所有権はパネル内のグループにある。
@@ -63,6 +69,17 @@ private:
     /// @param key 登録済みの項目名。
     /// @param value 単位を含む読み取り専用の表示文字列。
     void showField(const QString &key, const QString &value);
+    /// @brief 選択頂点の移動・追加・削除・方向反転を実行し、不正な候補は保持しない。
+    /// @param action back/next/current/add/remove/reverseの操作名。
+    void editVertex(const QString &action);
+    // m_vertexControls: 頂点操作と開閉チェックをまとめる、形状グループ所有のコンテナ。
+    QWidget *m_vertexControls;
+    // m_vertexLabel: 現在の頂点番号を表示する、操作コンテナ所有のラベル。
+    QLabel *m_vertexLabel;
+    // m_closed: 多角形の開閉状態を表示・編集するチェックボックス。
+    QCheckBox *m_closed;
+    // m_vertexIndex: 単独選択多角形の現在の頂点番号（0始まり）。
+    qsizetype m_vertexIndex = 0;
     // m_document: 所有しない確定図形モデル。破棄時に空になる。
     QPointer<DrawingDocument> m_document;
     // m_selection: 所有しない選択モデル。表示アイテムのポインタは参照しない。
@@ -85,7 +102,7 @@ private:
     QGroupBox *m_lineGroup;
     // m_lineForm: 単位付き項目名と数値入力を並べる、直線グループ所有のレイアウト。
     QFormLayout *m_lineForm;
-    // m_edits: 直線6項目と幅・高さ・半径の入力欄。各形状グループまたは行コンテナが所有する。
+    // m_edits: 直線の6項目と各形状の座標・寸法・角度・頂点入力欄。各形状グループまたは行コンテナが所有する。
     QHash<QString, QLineEdit*> m_edits;
     // m_error: 不正入力・形状更新失敗の理由を表示する、パネル所有のラベル。
     QLabel *m_error;

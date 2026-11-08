@@ -7,9 +7,13 @@
 #include "shapeselectionmodel.h"
 #include "rectangleanchorselector.h"
 #include <QHBoxLayout>
+#include <QPushButton>
+#include <QCheckBox>
+#include <algorithm>
 #include <QLabel>
 #include <QGroupBox>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QLocale>
@@ -81,6 +85,37 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
     addField("width", tr("幅")); addField("height", tr("高さ"));
     addField("centerX", tr("中心 X")); addField("centerY", tr("中心 Y"));
     addField("radius", tr("半径")); addField("diameter", tr("直径")); addField("vertices", tr("頂点数"));
+    addField("rectangleAngle",tr("角度 (°)")); addField("arcStart",tr("開始角度 (°)"));
+    addField("arcSweep",tr("円弧角 (°)")); addField("vertexX",tr("頂点 X")); addField("vertexY",tr("頂点 Y"));
+    m_vertexControls = new QWidget(m_shapeGroup);
+    // vertexLayout: 頂点番号・操作・開閉をまとめるコンテナ所有のレイアウト。
+    auto *vertexLayout = new QVBoxLayout(m_vertexControls); vertexLayout->setContentsMargins(0,0,0,0);
+    m_vertexLabel = new QLabel(m_vertexControls); vertexLayout->addWidget(m_vertexLabel);
+    // actions: CSVの頂点順に従う移動、再選択、挿入・削除・反転ボタンの内部名と表示名。
+    const QList<QPair<QString,QString>> actions{{"back",tr("戻る")},{"current",tr("頂点")},{"next",tr("次へ")},
+        {"add",tr("頂点を追加")},{"remove",tr("頂点を削除")},{"reverse",tr("方向を反転")}};
+    // index: 3列ずつ並べるボタンの番号。
+    int index = 0;
+    // buttons: ボタンの行列を所有するレイアウト。
+    auto *buttons = new QGridLayout; vertexLayout->addLayout(buttons);
+    // action: 各ボタンの操作キーと表示名。
+    for (const auto &action : actions) {
+        // button: 操作コンテナが所有する頂点操作ボタン。
+        auto *button = new QPushButton(action.second,m_vertexControls); button->setObjectName("vertex_"+action.first);
+        buttons->addWidget(button,index/3,index%3); ++index;
+        // コールバック: このボタンに対応する操作を最新の単独選択へ適用する。
+        connect(button,&QPushButton::clicked,this,[this,action] { editVertex(action.first); });
+    }
+    m_closed = new QCheckBox(tr("多角形を閉じる"),m_vertexControls); m_closed->setObjectName("polygonClosed");
+    vertexLayout->addWidget(m_closed); m_form->addRow(m_vertexControls);
+    // コールバック: 開閉時も頂点列を維持し、不正な閉形状なら元の状態へ戻す。
+    connect(m_closed,&QCheckBox::clicked,this,[this](bool closed) {
+        // data: 最新の単独選択をコピーした更新候補。
+        auto data = m_selection ? m_selection->singleShape() : std::nullopt;
+        if (!isEnabled() || !data || data->id != m_editId || data->kind() != ShapeKind::Polygon) { refresh(); return; }
+        data->polygonClosed = closed;
+        if (!m_document->updateShape(*data)) { refresh(); m_error->setText(tr("3点以上の有効な面が必要なため閉じられません。")); }
+    });
     contentLayout->addWidget(m_shapeGroup);
     m_lineGroup = new QGroupBox(tr("形状"), content);
     m_lineForm = new QFormLayout(m_lineGroup); m_lineForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
@@ -132,8 +167,8 @@ void ObjectInfoPanel::addField(const QString &key, const QString &title)
     auto *value = new QLabel(row); value->setObjectName("property_" + key);
     value->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
     value->setWordWrap(true); layout->addWidget(value);
-    if (key == "width" || key == "height" || key == "radius") {
-        // edit: 四角形の幅・高さ、または円の半径でだけ表示する入力欄。
+    if (key != "vertices") {
+        // edit: 選択図形の種類に応じて表示する数値入力欄。
         auto *edit = createEditor(key,row); edit->hide(); layout->addWidget(edit);
     }
     m_form->addRow(title,row); m_values.insert(key,value); m_fieldRows.insert(key,row);
@@ -157,7 +192,9 @@ void ObjectInfoPanel::refresh()
     for (auto *value : m_values) value->clear();
     // row: 前の図形にだけ必要だった項目を隠す、形状グループ所有のコンテナ。
     for (auto *row : m_fieldRows) m_form->setRowVisible(row,false);
-    m_error->clear(); m_editId = {};
+    m_error->clear();
+    // previousId: 選択図形が変わったときだけ頂点番号を先頭へ戻すための前回UUID。
+    const QUuid previousId = m_editId; m_editId = {};
     // edit: 以前の図形の下書きを破棄する、パネル内コンテナ所有の入力欄。
     for (auto *edit : m_edits) { edit->clear(); edit->setModified(false); }
     // single: 単独選択時に取得する値データ。表示のためにモデルを変更しない。
@@ -166,7 +203,11 @@ void ObjectInfoPanel::refresh()
     const bool isLine = single && single->kind() == ShapeKind::Line;
     // isRectangle: 四角形だけで9点の固定位置選択を表示する。
     const bool isRectangle = single && single->kind() == ShapeKind::Rectangle;
-    m_form->setRowVisible(m_anchorSelector,isRectangle);
+    // isPolygon: 頂点編集と外接矩形の9点基準を表示する対象。
+    const bool isPolygon = single && single->kind() == ShapeKind::Polygon;
+    m_form->setRowVisible(m_anchorSelector,isRectangle || isPolygon);
+    m_form->setRowVisible(m_vertexControls,isPolygon);
+    if (!isPolygon) emit vertexHighlighted({},false);
     m_anchorLabel->setText(tr("固定点: %1").arg(m_anchorSelector->anchorName()));
     // axis: 四角形では基準点、それ以外では左下として座標の意味を明示する行名。
     for (const QString axis : {QStringLiteral("X"),QStringLiteral("Y")}) {
@@ -174,7 +215,7 @@ void ObjectInfoPanel::refresh()
         const QString key = "origin" + axis;
         // label: フォームが生成・所有する、座標の項目名ラベル。
         auto *label = qobject_cast<QLabel*>(m_form->labelForField(m_fieldRows.value(key)));
-        label->setText(isRectangle ? tr("基準点 %1").arg(axis) : tr("左下 %1").arg(axis));
+        label->setText((isRectangle || isPolygon) ? tr("基準点 %1").arg(axis) : tr("左下 %1").arg(axis));
     }
     m_shapeGroup->setVisible(single.has_value() && !isLine); m_lineGroup->setVisible(isLine);
     if (!single) {
@@ -185,6 +226,7 @@ void ObjectInfoPanel::refresh()
         return;
     }
     m_editId = single->id;
+    if (previousId != m_editId) m_vertexIndex = 0;
     // offset: 図形の形状全体に加える配置移動量（実寸mm）。
     const QPointF offset = single->positionMm;
     switch (single->kind()) {
@@ -204,13 +246,14 @@ void ObjectInfoPanel::refresh()
         break;
     }
     case ShapeKind::Circle: {
-        m_summary->setText(tr("円"));
         // circle: 真円の中心と半径の形状データ（実寸mm）。
         const auto circle = std::get<CircleGeometry>(single->geometryMm);
-        showField("centerX", millimeters(circle.centerMm.x() + offset.x()));
-        showField("centerY", millimeters(circle.centerMm.y() + offset.y()));
+        m_summary->setText(circle.sweepAngleDeg == 360 ? tr("円") : tr("円弧"));
+        showField("centerX", millimeters(circle.centerMm.x() + offset.x())); showEditor("centerX",circle.centerMm.x()+offset.x());
+        showField("centerY", millimeters(circle.centerMm.y() + offset.y())); showEditor("centerY",circle.centerMm.y()+offset.y());
         showField("radius", millimeters(circle.radiusMm)); showEditor("radius",circle.radiusMm);
-        showField("diameter", millimeters(2 * circle.radiusMm));
+        showField("diameter", millimeters(2 * circle.radiusMm)); showEditor("diameter",2*circle.radiusMm);
+        showEditor("arcStart",circle.startAngleDeg); showEditor("arcSweep",circle.sweepAngleDeg);
         break;
     }
     case ShapeKind::Rectangle:
@@ -220,14 +263,28 @@ void ObjectInfoPanel::refresh()
         m_summary->setText(single->kind() == ShapeKind::Rectangle ? tr("四角") : tr("多角形"));
         showField("originX", millimeters(bounds.left())); showField("originY", millimeters(bounds.top()));
         showField("width", millimeters(bounds.width())); showField("height", millimeters(bounds.height()));
+        // fraction: 四角形・外接矩形で共用する9点基準（無次元）。
+        const QPointF fraction = m_anchorSelector->normalizedAnchor();
+        // reference: 回転後の四角形または多角形の外接範囲の基準点（実寸mm）。
+        const QPointF reference = single->referencePoint(fraction);
+        showField("originX",millimeters(reference.x())); showField("originY",millimeters(reference.y()));
+        showEditor("originX",reference.x()); showEditor("originY",reference.y());
         if (single->kind() == ShapeKind::Polygon) {
-            showField("vertices", QString::number(std::get<QPolygonF>(single->geometryMm).size()));
-        } else {
-            // fraction: 左下(0,0)〜右上(1,1)で表す、選択中の固定点（無次元）。
-            const QPointF fraction = m_anchorSelector->normalizedAnchor();
-            showField("originX",millimeters(bounds.x()+bounds.width()*fraction.x()));
-            showField("originY",millimeters(bounds.y()+bounds.height()*fraction.y()));
+            // points: 順序を維持して個別編集する頂点列（ローカル実寸mm）。
+            const auto &points = std::get<QPolygonF>(single->geometryMm);
+            m_vertexIndex = std::clamp(m_vertexIndex,qsizetype(0),points.size()-1);
+            showField("vertices",QString::number(points.size()));
             showEditor("width",bounds.width()); showEditor("height",bounds.height());
+            showEditor("vertexX",points[m_vertexIndex].x()+offset.x());
+            showEditor("vertexY",points[m_vertexIndex].y()+offset.y());
+            m_vertexLabel->setText(tr("頂点 %1 / %2").arg(m_vertexIndex+1).arg(points.size()));
+            m_closed->setChecked(single->polygonClosed);
+            emit vertexHighlighted(points[m_vertexIndex]+offset,true);
+        } else {
+            // rect: 回転前の辺長を保持する矩形。外接幅と混同しない。
+            const auto &rect = std::get<QRectF>(single->geometryMm);
+            showEditor("width",rect.width()); showEditor("height",rect.height());
+            showEditor("rectangleAngle",single->rectangleAngleDeg);
         }
         break;
     }
@@ -252,10 +309,10 @@ QLineEdit *ObjectInfoPanel::createEditor(const QString &key, QWidget *parent)
     // bound: 角度・寸法も有限のdoubleとして入力できる最大値。
     const double bound = std::numeric_limits<double>::max();
     // dimension: 正の値だけを確定できる長さ・幅・高さ・半径の項目かどうか。
-    const bool dimension = key == "length" || key == "width" || key == "height" || key == "radius";
+    const bool dimension = key == "length" || key == "width" || key == "height" || key == "radius" || key == "diameter";
     // validator: 表示桁と揃えた通常表記を受け付ける、入力欄所有の検証器。
     auto *validator = new QDoubleValidator(dimension ? 0 : -bound,bound,DisplayPrecision,edit);
-    if (!dimension && key != "angle") validator->setRange(-ShapeData::CoordinateLimitMm,ShapeData::CoordinateLimitMm,DisplayPrecision);
+    if (!dimension && key != "angle" && key != "rectangleAngle" && key != "arcStart" && key != "arcSweep") validator->setRange(-ShapeData::CoordinateLimitMm,ShapeData::CoordinateLimitMm,DisplayPrecision);
     validator->setNotation(QDoubleValidator::StandardNotation); edit->setValidator(validator);
     edit->installEventFilter(this); m_edits.insert(key,edit);
     return edit;
@@ -310,7 +367,7 @@ void ObjectInfoPanel::commitField(const QString &key)
     if (!isEnabled() || !m_document || !m_selection) return;
     // single: Enter時点の単独選択を再取得し、別図形へ古い入力が適用されるのを防ぐ。
     const auto single = m_selection->singleShape();
-    if (!single || single->id != m_editId || single->kind() == ShapeKind::Polygon) { refresh(); return; }
+    if (!single || single->id != m_editId) { refresh(); return; }
     // edit: 今回確定する1項目の入力欄。
     auto *edit = m_edits.value(key);
     if (!edit || !edit->isModified()) return;
@@ -321,27 +378,58 @@ void ObjectInfoPanel::commitField(const QString &key)
     if (!valid || !std::isfinite(value) || !edit->hasAcceptableInput()) {
         m_error->setText(tr("入力値が範囲外、または数値として不正です。小数点以下6桁までで指定してください。")); return;
     }
-    if (single->kind() == ShapeKind::Rectangle || single->kind() == ShapeKind::Circle) {
-        if (value <= 0) { m_error->setText(tr("幅・高さ・半径は0より大きい値を指定してください。")); return; }
-        // applied: 対象種類に対応する寸法変更が検証・確定されたかどうか。
-        bool applied = false;
-        if (single->kind() == ShapeKind::Rectangle && (key == "width" || key == "height")) {
-            // current: 配置移動量を含めた、変更前の実寸矩形（mm）。
-            const QRectF current = std::get<QRectF>(single->geometryMm).translated(single->positionMm);
-            // size: 未編集の寸法を精密値のまま保持する更新候補（実寸mm）。
-            QSizeF size = current.size();
-            if (key == "width") size.setWidth(value); else size.setHeight(value);
-            // fraction: 上下をCAD座標へ対応付けた固定点の相対位置（無次元）。
-            const QPointF fraction = m_anchorSelector->normalizedAnchor();
-            // origin: 固定点が動かないように、サイズ差に応じて移す左下座標（実寸mm）。
-            const QPointF origin = current.topLeft() + QPointF((current.width()-size.width())*fraction.x(),
-                                                               (current.height()-size.height())*fraction.y());
-            applied = m_document->setRectangleBounds(single->id,QRectF(origin,size));
-        } else if (single->kind() == ShapeKind::Circle && key == "radius") {
-            applied = m_document->setCircleRadius(single->id,value);
+    if (single->kind() != ShapeKind::Line) {
+        // next: 未編集属性・精度・UUIDを保つ更新候補。失敗時は文書に渡さない。
+        ShapeData next = *single;
+        // fraction: 寸法・回転の前後で実寸座標を保持する選択基準。
+        const QPointF fraction = m_anchorSelector->normalizedAnchor();
+        // fixed: 寸法・角度変更前の基準点（実寸mm）。
+        const QPointF fixed = next.referencePoint(fraction);
+        if (key == "originX" || key == "originY") {
+            next.positionMm += key == "originX" ? QPointF(value-fixed.x(),0) : QPointF(0,value-fixed.y());
+        } else if (next.kind() == ShapeKind::Rectangle) {
+            // rect: 辺長だけを編集する矩形候補。回転と配置は別に維持する。
+            auto &rect = std::get<QRectF>(next.geometryMm);
+            if (key == "width" && value > 0) rect.setWidth(value);
+            else if (key == "height" && value > 0) rect.setHeight(value);
+            else if (key == "rectangleAngle") {
+                next.rectangleAngleDeg = std::fmod(value,360); if (next.rectangleAngleDeg < 0) next.rectangleAngleDeg += 360;
+            } else { m_error->setText(tr("寸法は0より大きい値が必要です。")); return; }
+            next.positionMm += fixed-next.referencePoint(fraction);
+        } else if (next.kind() == ShapeKind::Circle) {
+            // circle: 中心・寸法・開始角・円弧角を個別に編集する候補。
+            auto &circle = std::get<CircleGeometry>(next.geometryMm);
+            if (key == "centerX") circle.centerMm.setX(value-next.positionMm.x());
+            else if (key == "centerY") circle.centerMm.setY(value-next.positionMm.y());
+            else if ((key == "radius" || key == "diameter") && value > 0) circle.radiusMm = key == "diameter" ? value/2 : value;
+            else if (key == "arcStart") { circle.startAngleDeg = std::fmod(value,360); if (circle.startAngleDeg < 0) circle.startAngleDeg += 360; }
+            else if (key == "arcSweep" && value > 0 && value <= 360) circle.sweepAngleDeg = value;
+            else { m_error->setText(tr("寸法は正の値、円弧角は0より大きく360°以下で指定してください。")); return; }
+        } else {
+            // points: 個別頂点または外接範囲の拡縮に使うローカル実寸頂点列。
+            auto &points = std::get<QPolygonF>(next.geometryMm);
+            if (key == "vertexX" && m_vertexIndex < points.size()) points[m_vertexIndex].setX(value-next.positionMm.x());
+            else if (key == "vertexY" && m_vertexIndex < points.size()) points[m_vertexIndex].setY(value-next.positionMm.y());
+            else if ((key == "width" || key == "height") && value > 0) {
+                // bounds: 拡縮前の実寸外接範囲。
+                const QRectF bounds = next.boundsMm();
+                // extent: 縦または横だけの倍率を計算する元の辺長（実寸mm）。
+                const double extent = key == "width" ? bounds.width() : bounds.height();
+                if (extent <= 0) { m_error->setText(tr("元の寸法が0の方向には拡縮できません。頂点座標を編集してください。")); return; }
+                // point: 選択基準点の周りで拡縮する各頂点（ローカル実寸mm）。
+                for (auto &point : points) {
+                    if (key == "width") point.setX((point.x()+next.positionMm.x()-fixed.x())*(value/extent)+fixed.x()-next.positionMm.x());
+                    else point.setY((point.y()+next.positionMm.y()-fixed.y())*(value/extent)+fixed.y()-next.positionMm.y());
+                }
+            } else { m_error->setText(tr("寸法は0より大きい値が必要です。")); return; }
         }
-        if (!applied) {
-            m_error->setText(tr("変更後の図形が座標範囲（±10000000mm）を超えるため適用できません。")); return;
+        // 配置をローカル座標へ統合し、移動済み図形でも有効な実寸範囲全体を編集できるようにする。
+        if (auto *rect = std::get_if<QRectF>(&next.geometryMm)) *rect = rect->translated(next.positionMm);
+        else if (auto *circle = std::get_if<CircleGeometry>(&next.geometryMm)) circle->centerMm += next.positionMm;
+        else std::get<QPolygonF>(next.geometryMm).translate(next.positionMm);
+        next.positionMm = {};
+        if (!m_document->updateShape(next)) {
+            m_error->setText(tr("変更後の形状が無効、または座標範囲（±10000000mm）を超えるため適用できません。")); return;
         }
         refresh(); return;
     }
@@ -376,4 +464,39 @@ void ObjectInfoPanel::commitField(const QString &key)
         m_error->setText(tr("長さが0になる変更、または座標が±10000000mmを超える変更は適用できません。")); return;
     }
     refresh();
+}
+
+/// @brief 選択頂点を巡回し、頂点数・実寸範囲を検証してから編集を確定する。
+/// @param action back/next/current/add/remove/reverseの操作名。
+void ObjectInfoPanel::editVertex(const QString &action)
+{
+    if (!isEnabled() || !m_document || !m_selection) return;
+    // data: 最新の単独選択のコピー。別図形への古いボタン操作を拒否する。
+    auto data = m_selection->singleShape();
+    if (!data || data->id != m_editId || data->kind() != ShapeKind::Polygon) return;
+    // points: 順序を保って変更する候補のローカル実寸頂点列。
+    auto &points = std::get<QPolygonF>(data->geometryMm);
+    // previous: 不正な更新を拒否した場合に戻す元の頂点番号。
+    const qsizetype previous = m_vertexIndex;
+    m_vertexIndex = std::clamp(m_vertexIndex,qsizetype(0),points.size()-1);
+    if (action == "back") m_vertexIndex = (m_vertexIndex+1)%points.size();
+    else if (action == "next") m_vertexIndex = (m_vertexIndex+points.size()-1)%points.size();
+    else if (action == "add") {
+        // insert: 開いた終点では前の辺、それ以外では選択頂点の次の辺へ挿入する番号。
+        const qsizetype insert = !data->polygonClosed && m_vertexIndex == points.size()-1 ? m_vertexIndex : m_vertexIndex+1;
+        // first: 挿入する辺の始点の番号。
+        const qsizetype first = insert-1;
+        // middle: 既存の辺の中点（ローカル実寸mm）。
+        const QPointF middle = (points[first]+points[insert%points.size()])/2;
+        points.insert(insert,middle); m_vertexIndex = insert;
+    } else if (action == "remove") {
+        if (points.size() <= (data->polygonClosed ? 3 : 2)) { m_error->setText(tr("閉じた多角形は3点、開いた形状は2点以上必要です。")); return; }
+        points.removeAt(m_vertexIndex); m_vertexIndex = std::min(m_vertexIndex,points.size()-1);
+    } else if (action == "reverse") {
+        std::reverse(points.begin(),points.end()); m_vertexIndex = points.size()-1-m_vertexIndex;
+    }
+    if (action == "back" || action == "next" || action == "current") { refresh(); return; }
+    if (!m_document->updateShape(*data)) {
+        m_vertexIndex = previous; refresh(); m_error->setText(tr("有効な頂点・形状を保てないため適用できません。"));
+    }
 }

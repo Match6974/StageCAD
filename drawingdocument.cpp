@@ -127,7 +127,7 @@ bool DrawingDocument::setRectangleBounds(const QUuid &id, const QRectF &boundsMm
     const auto original = shape(id);
     if (!original || original->kind() != ShapeKind::Rectangle) return false;
     // next: 配置を実寸形状へ統合して検証する候補。通知中もUUIDを固定して保持する。
-    const ShapeData next{id, boundsMm, {}};
+    ShapeData next = *original; next.geometryMm = boundsMm; next.positionMm = {};
     if (!next.isValid()) return false;
     // current: 配置移動量を反映した変更前の矩形（実寸mm）。
     const QRectF current = std::get<QRectF>(original->geometryMm).translated(original->positionMm);
@@ -154,7 +154,9 @@ bool DrawingDocument::setCircleRadius(const QUuid &id, double radiusMm)
     // circle: 現在のローカル中心・半径。配置移動量は中心へ加えて正本を更新する。
     const auto circle = std::get<CircleGeometry>(original->geometryMm);
     // next: 中心の実寸座標を保持した候補。配置移動量は0へ統合する。
-    const ShapeData next{id, CircleGeometry{circle.centerMm + original->positionMm, radiusMm}, {}};
+    ShapeData next = *original;
+    next.positionMm = {}; next.geometryMm = CircleGeometry{circle.centerMm + original->positionMm, radiusMm,
+                                                          circle.startAngleDeg,circle.sweepAngleDeg};
     if (!next.isValid()) return false;
     if (circle.radiusMm == radiusMm) return true;
     // mutating: 通知中の文書変更を防ぎ、一貫した形状だけを公開するガード。
@@ -164,4 +166,21 @@ bool DrawingDocument::setCircleRadius(const QUuid &id, double radiusMm)
     for (auto &data : m_shapes) if (data.id == next.id) { data = next; break; }
     emit shapeChanged(next.id);
     return true;
+}
+
+/// @brief 全属性を検証して更新し、通知中は候補値をコピーで保持して再入を拒否する。
+/// @param candidate 同じUUID・種類で更新する候補形状。座標は実寸mm。
+bool DrawingDocument::updateShape(const ShapeData &candidate)
+{
+    // next: 通知コールバックから独立させた更新候補。
+    const ShapeData next = candidate;
+    // original: 同じ図形種類とUUIDを確認する変更前の値。
+    const auto original = shape(next.id);
+    if (m_mutating || !original || original->kind() != next.kind() || !next.isValid()) return false;
+    // mutating: モデル更新と通知の途中で別更新が割り込むのを防ぐ。
+    QScopedValueRollback<bool> mutating(m_mutating,true);
+    emit aboutToChange();
+    // data: 描画順を変えずに置き換える文書内の図形。
+    for (auto &data : m_shapes) if (data.id == next.id) { data = next; break; }
+    emit shapeChanged(next.id); return true;
 }

@@ -14,6 +14,7 @@
 #include "rectangleanchorselector.h"
 #include <QGraphicsRectItem>
 #include <QDockWidget>
+#include <QCheckBox>
 #include <QAction>
 #include <QContextMenuEvent>
 #include <QMenu>
@@ -132,6 +133,80 @@ private slots:
         QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({circle}));
         QCOMPARE(rectItem->rect(),QRectF(-60,-50,100,80));
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-circle-radius.png"));
+        // diameter: 中心座標を保持して直径からも寸法を変更できる入力欄。
+        auto *diameter = info->findChild<QLineEdit*>("edit_diameter");
+        diameter->setFocus(); diameter->selectAll(); QTest::keyClicks(diameter,"80"); QTest::keyClick(diameter,Qt::Key_Return);
+        QCOMPARE(ellipseItem->rect(),QRectF(30,-10,80,80));
+        // sweep: 図面上の円を開いた円弧へ変更する入力欄。
+        auto *sweep = info->findChild<QLineEdit*>("edit_arcSweep");
+        sweep->setFocus(); sweep->selectAll(); QTest::keyClicks(sweep,"120"); QTest::keyClick(sweep,Qt::Key_Return);
+        QVERIFY(!view->document()->shape(circle)->isFilled());
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-arc-properties.png"));
+        QVERIFY(view->selectionModel()->selectOnly(rectangle));
+        // rotation: 選択した右上を固定して回転する角度入力欄。
+        auto *rotation = info->findChild<QLineEdit*>("edit_rectangleAngle");
+        rotation->setFocus(); rotation->selectAll(); QTest::keyClicks(rotation,"30"); QTest::keyClick(rotation,Qt::Key_Return);
+        QCOMPARE(view->shapeItems().first(),rectItem);
+        QVERIFY(QLineF(view->document()->shape(rectangle)->referencePoint({1,1}),QPointF(40,30)).length()<1e-8);
+        QVERIFY(!rectItem->transform().isIdentity());
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-rotated-properties.png"));
+        // polygon: マーカー表示と個別頂点編集をメイン画面で検証する多角形UUID。
+        const auto polygon = view->document()->addShape(QPolygonF({{-90,-70},{30,-70},{-30,10}}));
+        QVERIFY(view->selectionModel()->selectOnly(polygon));
+        QTest::mouseClick(info->findChild<QPushButton*>("vertex_back"),Qt::LeftButton);
+        // vertex: 選択頂点だけを動かす実寸X入力欄。
+        auto *vertex = info->findChild<QLineEdit*>("edit_vertexX");
+        vertex->setFocus(); vertex->selectAll(); QTest::keyClicks(vertex,"40"); QTest::keyClick(vertex,Qt::Key_Return);
+        QCOMPARE(std::get<QPolygonF>(view->document()->shape(polygon)->geometryMm)[1],QPointF(40,-70));
+        QTest::mouseClick(info->findChild<QCheckBox*>("polygonClosed"),Qt::LeftButton);
+        QVERIFY(!view->document()->shape(polygon)->polygonClosed);
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-polygon-properties.png"));
+
+    }
+    /// @brief 回転矩形・開いた円弧と多角形の描画・選択判定、および移動の整合性を検証する。
+    void extendedGeometrySelection() {
+        // settings: 実寸と画面座標の変換設定。
+        DrawingSettings settings;
+        // view: 拡張属性を持つ図形の表示とマウス入力を検証するCADビュー。
+        DrawingView view(&settings); view.resize(900,800); view.show(); QTest::qWait(10);
+        // document: 表示アイテムの正本となる文書。
+        auto *document = view.document();
+        // rectangle: 90度回転した矩形のUUID。
+        const auto rectangle = document->addShape(QRectF(0,0,60,20));
+        // data: 各図形の拡張属性を設定するコピー。
+        auto data = *document->shape(rectangle); data.rectangleAngleDeg = 90; QVERIFY(document->updateShape(data));
+        // item: UUIDと描画順を維持して回転した矩形のアイテム。
+        auto *item = view.shapeItems().first();
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({-10,30}));
+        QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({30,10}));
+        QVERIFY(view.selectionModel()->selectedIds().isEmpty());
+        QVERIFY(document->translateShapes({rectangle},{-40,-30})); QCOMPARE(view.shapeItems().first(),item);
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({-50,0}));
+        QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
+        // circle: 第1象限の四分円に変更するUUID。
+        const auto circle = document->addShape(CircleGeometry{{40,40},25});
+        data = *document->shape(circle); std::get<CircleGeometry>(data.geometryMm).sweepAngleDeg = 90;
+        QVERIFY(document->updateShape(data));
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({40,40}));
+        QVERIFY(view.selectionModel()->selectedIds().isEmpty());
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({65,40}));
+        QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({circle}));
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({15,40}));
+        QVERIFY(view.selectionModel()->selectedIds().isEmpty());
+        // polygon: 左辺だけが開いた四角い多角形のUUID。
+        const auto polygon = document->addShape(QPolygonF({{0,-60},{60,-60},{60,-20},{0,-20}}));
+        data = *document->shape(polygon); data.polygonClosed = false; QVERIFY(document->updateShape(data));
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({0,-40}));
+        QVERIFY(view.selectionModel()->selectedIds().isEmpty());
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({30,-40}));
+        QVERIFY(view.selectionModel()->selectedIds().isEmpty());
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({30,-60}));
+        QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({polygon}));
+        data.polygonClosed = true; QVERIFY(document->updateShape(data));
+        QTest::mouseClick(view.viewport(),Qt::LeftButton,Qt::NoModifier,view.mapFromScene({30,-40}));
+        QCOMPARE(view.selectionModel()->selectedIds(),QList<QUuid>({polygon}));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(view.grab().save("step3-extended-geometry.png"));
     }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {

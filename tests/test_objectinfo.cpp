@@ -7,6 +7,8 @@
 #include "shapeselectionmodel.h"
 #include "rectangleanchorselector.h"
 #include <QToolButton>
+#include <QPushButton>
+#include <QCheckBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -180,6 +182,135 @@ private slots:
         editor(panel,"radius")->setText("99"); editor(panel,"radius")->setModified(true);
         panel.setEnabled(false); panel.setEnabled(true); QCOMPARE(changed.count(),0);
         QCOMPARE(editor(panel,"radius")->text(),QString("5.123457"));
+    }
+    /// @brief 回転後も9点の各固定点・辺長・座標指定を維持することを検証する。
+    void rotatedRectangleEditing_data() { rectangleAnchors_data(); }
+    /// @brief 実寸基準点を固定して回転・拡縮し、その後の座標変更では全体を移動する。
+    void rotatedRectangleEditing() {
+        // anchorIndex: 行優先の9点番号。fraction: 対応するローカル相対位置。
+        QFETCH(int,anchorIndex); QFETCH(QPointF,fraction);
+        // document: 寸法と回転を保持する確定図形モデル。
+        DrawingDocument document;
+        // selection: 編集後も維持するUUID選択。
+        ShapeSelectionModel selection(&document);
+        // panel: 実際に数値入力するパネル。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // id: 配置移動済み四角形のUUID。
+        const auto id = document.addShape(QRectF(10,20,30,40));
+        QVERIFY(document.translateShapes({id},{100,200})); QVERIFY(selection.selectOnly(id));
+        QVERIFY(panel.findChild<RectangleAnchorSelector*>()->setAnchorIndex(anchorIndex));
+        // fixed: 回転・寸法変更前に固定点があった実寸座標（mm）。
+        const QPointF fixed = document.shape(id)->referencePoint(fraction);
+        enter(panel,"rectangleAngle","90"); enter(panel,"width","60"); enter(panel,"height","80");
+        QCOMPARE(document.shape(id)->referencePoint(fraction),fixed);
+        QCOMPARE(std::get<QRectF>(document.shape(id)->geometryMm).size(),QSizeF(60,80));
+        QCOMPARE(document.shape(id)->boundsMm().size(),QSizeF(80,60));
+        enter(panel,"originX","-50"); enter(panel,"originY","75");
+        QCOMPARE(document.shape(id)->referencePoint(fraction),QPointF(-50,75));
+        QCOMPARE(document.shape(id)->rectangleAngleDeg,90.0);
+        enter(panel,"rectangleAngle","-45"); QCOMPARE(document.shape(id)->rectangleAngleDeg,315.0);
+        QVERIFY(QLineF(document.shape(id)->referencePoint(fraction),QPointF(-50,75)).length()<1e-8);
+        QCOMPARE(selection.selectedIds(),QList<QUuid>({id}));
+    }
+    /// @brief 多角形外接範囲の9点をパラメータとして用意する。
+    void polygonBoundsAnchors_data() { rectangleAnchors_data(); }
+    /// @brief 非矩形の多角形でも外接範囲の選択基準点を固定して拡縮する。
+    void polygonBoundsAnchors() {
+        // anchorIndex: 9点の番号。fraction: 各基準点の外接範囲内での相対位置。
+        QFETCH(int,anchorIndex); QFETCH(QPointF,fraction);
+        // document: 頂点列の座標を正本として保持する文書。
+        DrawingDocument document;
+        // selection: 拡縮対象の単独選択モデル。
+        ShapeSelectionModel selection(&document);
+        // panel: 9点と外接幅・高さを編集する情報パレット。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // id: 移動した三角形のUUID。
+        const auto id = document.addShape(QPolygonF({{0,0},{40,0},{10,30}}));
+        QVERIFY(document.translateShapes({id},{10,20})); QVERIFY(selection.selectOnly(id));
+        QVERIFY(panel.findChild<RectangleAnchorSelector*>()->setAnchorIndex(anchorIndex));
+        // fixed: 拡縮前の基準点の実寸座標（mm）。
+        const QPointF fixed = document.shape(id)->referencePoint(fraction);
+        enter(panel,"width","80"); enter(panel,"height","60");
+        QCOMPARE(document.shape(id)->referencePoint(fraction),fixed);
+        QCOMPARE(document.shape(id)->boundsMm().size(),QSizeF(80,60));
+        enter(panel,"width","20"); enter(panel,"height","15");
+        QCOMPARE(document.shape(id)->referencePoint(fraction),fixed);
+        QCOMPARE(document.shape(id)->boundsMm().size(),QSizeF(20,15));
+    }
+    /// @brief 円の中心・直径・開始角・円弧角の連動と不正角度拒否を確認する。
+    void circleCoordinatesDiameterAndArc() {
+        // document: 中心と円弧属性の保持を確認する文書。
+        DrawingDocument document;
+        // selection: 同じUUIDを真円・円弧で維持する選択。
+        ShapeSelectionModel selection(&document);
+        // panel: 中心・寸法・角度の入力先。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // id: 移動済み円のUUID。
+        const auto id = document.addShape(CircleGeometry{{10,20},5.123456789});
+        QVERIFY(document.translateShapes({id},{100,200})); QVERIFY(selection.selectOnly(id));
+        enter(panel,"centerX","-10"); enter(panel,"centerY","-20");
+        QCOMPARE(std::get<CircleGeometry>(document.shape(id)->geometryMm).centerMm,QPointF(-10,-20));
+        QCOMPARE(std::get<CircleGeometry>(document.shape(id)->geometryMm).radiusMm,5.123456789);
+        enter(panel,"diameter","40"); QCOMPARE(editor(panel,"radius")->text(),QString("20"));
+        enter(panel,"arcStart","450"); enter(panel,"arcSweep","90");
+        // arc: +Yから-Xまで反時計回りに伸びる、開いた四分円の形状。
+        const auto arc = *document.shape(id);
+        QVERIFY(!arc.isFilled()); QVERIFY(QLineF(arc.localPath().pointAtPercent(0),QPointF(-10,0)).length()<1e-6);
+        QVERIFY(QLineF(arc.localPath().pointAtPercent(1),QPointF(-30,-20)).length()<1e-6);
+        // changes: 不正な角度指定を通知しないことの監視。
+        QSignalSpy changes(&document,&DrawingDocument::shapeChanged);
+        enter(panel,"arcSweep","0"); QCOMPARE(changes.count(),0);
+        editor(panel,"arcSweep")->setText("361"); editor(panel,"arcSweep")->setModified(true);
+        QTest::keyClick(editor(panel,"arcSweep"),Qt::Key_Return); QCOMPARE(changes.count(),0);
+        QTest::keyClick(editor(panel,"arcSweep"),Qt::Key_Escape);
+        enter(panel,"radius","25"); QCOMPARE(editor(panel,"diameter")->text(),QString("50"));
+        QCOMPARE(std::get<CircleGeometry>(document.shape(id)->geometryMm).sweepAngleDeg,90.0);
+        enter(panel,"arcSweep","360"); QVERIFY(document.shape(id)->isFilled());
+        QCOMPARE(selection.selectedIds(),QList<QUuid>({id}));
+    }
+    /// @brief 多角形の外接範囲・各頂点座標・巡回・挿入・削除・反転・開閉を確認する。
+    void polygonEditing() {
+        // document: 多角形の順序と開閉を保持する文書。
+        DrawingDocument document;
+        // selection: 同じ多角形を編集し続ける選択モデル。
+        ShapeSelectionModel selection(&document);
+        // panel: 頂点ボタンと数値入力を操作するパネル。
+        ObjectInfoPanel panel(&document,&selection); panel.show();
+        // id: 外接範囲(0,0)-(40,40)の四角い多角形のUUID。
+        const auto id = document.addShape(QPolygonF({{0,0},{40,0},{40,40},{0,40}}));
+        QVERIFY(document.translateShapes({id},{100,200})); QVERIFY(selection.selectOnly(id));
+        QVERIFY(panel.findChild<RectangleAnchorSelector*>()->setAnchorIndex(6));
+        enter(panel,"originX","-10"); enter(panel,"originY","-20");
+        enter(panel,"width","80"); enter(panel,"height","60");
+        QCOMPARE(document.shape(id)->boundsMm(),QRectF(-10,-20,80,60));
+        enter(panel,"vertexX","-15"); enter(panel,"vertexY","-25");
+        QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).first(),QPointF(-15,-25));
+        // highlight: 頂点選択の図面マーカー通知を監視する。
+        QSignalSpy highlight(&panel,&ObjectInfoPanel::vertexHighlighted);
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_back"),Qt::LeftButton);
+        QCOMPARE(editor(panel,"vertexX")->text(),QString("70"));
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_next"),Qt::LeftButton);
+        QCOMPARE(editor(panel,"vertexX")->text(),QString("-15"));
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_current"),Qt::LeftButton); QVERIFY(!highlight.isEmpty());
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_add"),Qt::LeftButton);
+        QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).size(),5);
+        QCOMPARE(editor(panel,"vertexX")->text(),QString("27.5"));
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_remove"),Qt::LeftButton);
+        QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).size(),4);
+        // chosen: 方向反転後も選択し続ける実寸頂点。
+        const QPointF chosen = highlight.last().at(0).toPointF();
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_reverse"),Qt::LeftButton);
+        QCOMPARE(highlight.last().at(0).toPointF(),chosen);
+        // closed: 頂点列を変えずに開閉できるチェック欄。
+        auto *closed = panel.findChild<QCheckBox*>("polygonClosed");
+        QTest::mouseClick(closed,Qt::LeftButton); QVERIFY(!document.shape(id)->polygonClosed);
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_remove"),Qt::LeftButton);
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_remove"),Qt::LeftButton);
+        QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).size(),2);
+        QTest::mouseClick(closed,Qt::LeftButton); QVERIFY(!document.shape(id)->polygonClosed); QVERIFY(!closed->isChecked());
+        QTest::mouseClick(panel.findChild<QPushButton*>("vertex_remove"),Qt::LeftButton);
+        QCOMPARE(std::get<QPolygonF>(document.shape(id)->geometryMm).size(),2);
+        selection.clear(); QVERIFY(!editor(panel,"vertexX")->isVisible());
     }
     /// @brief 6項目の入力が実寸に反映され、長さ・角度では始点を固定することを検証する。
     void lineEditingKeepsFirstPoint() {
