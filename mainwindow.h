@@ -22,6 +22,7 @@ class QTabWidget;
 class PdfCalibrationDialog;
 class ToolPalette;
 class ObjectInfoPanel;
+class NavigationPanel;
 class QToolBar;
 class QDoubleSpinBox;
 class QPushButton;
@@ -122,6 +123,8 @@ private:
     QString m_pdfPath;
     // m_toolPalette: 基本ドックが所有する、描画・選択ツールのパレット。
     ToolPalette *m_toolPalette;
+    // m_navigationPanel: レイヤー操作を提供する、右下のドック所有のパレット。
+    NavigationPanel *m_navigationPanel;
     // m_objectInfoPanel: 右側ドックが所有する、選択図形のプロパティ表示と直線・四角形・円の数値編集。
     ObjectInfoPanel *m_objectInfoPanel;
     // m_toolModeLabel: 選択ツールとモードを表示するラベル。親ツールバーが所有する。

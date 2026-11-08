@@ -7,11 +7,13 @@
 #define DRAWINGDOCUMENT_H
 
 #include "shapedata.h"
+#include "drawinglayer.h"
 #include <QObject>
 #include <QList>
 #include <optional>
 class QUndoStack;
 class DocumentEditCommand;
+class LayerEditCommand;
 
 // Owns committed CAD data without depending on a scene or widget. DrawingView
 // owns only its rendering items and temporary interaction previews.
@@ -62,6 +64,32 @@ public:
     /// @param candidate 更新する実寸形状と属性のコピー。UUIDと描画順は維持する。
     bool updateShape(const ShapeData &candidate);
 
+    /// @brief 描画順に並ぶデザインレイヤーを読み取り専用で返す。
+    const QList<DrawingLayer> &layers() const { return m_layers; }
+    /// @brief UUIDに対応するレイヤーを返す。存在しなければ空を返す。
+    /// @param id レイヤーUUID。
+    std::optional<DrawingLayer> layer(const QUuid &id) const;
+    /// @brief 新しい図形を配置するアクティブレイヤーUUIDを返す。
+    QUuid activeLayerId() const { return m_activeLayerId; }
+    /// @brief 名前が重複しないレイヤーを作成する。空の名前ではレイヤーNを自動採番する。
+    /// @param name 作成する名前。明示名が不正なら空UUIDを返す。
+    QUuid addLayer(const QString &name = {});
+    /// @brief 名前を検証して変更する。無変更では履歴を追加せず、不正値ではfalseを返す。
+    /// @param id 対象レイヤーのUUID。
+    /// @param name 新しい名前。空白のみ・制御文字・重複は不可。
+    bool renameLayer(const QUuid &id,const QString &name);
+    /// @brief アクティブを切り替え、対象を通常表示に戻す。表示操作なので履歴には含めない。
+    /// @param id 既存レイヤーUUID。
+    bool setActiveLayer(const QUuid &id);
+    /// @brief 表示状態を変更する。非表示・グレイの図形は編集できない。
+    /// @param id 対象レイヤーUUID。
+    /// @param visibility 通常・非表示・グレイのいずれか。
+    bool setLayerVisibility(const QUuid &id,LayerVisibility visibility);
+    /// @brief アクティブレイヤーに新しい図形を作成できるかを返す。
+    bool canCreateShape() const;
+    /// @brief 図形が存在し、通常表示レイヤーに所属しているかを返す。
+    /// @param id 確認する図形UUID。
+    bool canEditShape(const QUuid &id) const;
     /// @brief 戻せる確定済み操作があるかどうかを返す。
     bool canUndo() const;
     /// @brief やり直せる確定済み操作があるかどうかを返す。
@@ -72,6 +100,8 @@ public:
     bool redo();
 
 signals:
+    /// @brief レイヤーの追加・属性・アクティブ状態の変更後に通知する。
+    void layersChanged();
     /// @brief 履歴の可否が変わったときに通知する。メニューと表示バーは同じ履歴を参照する。
     void historyChanged();
     /// @brief Undo／Redoの直前に未確定の描画・入力を破棄するために通知する。
@@ -90,6 +120,15 @@ signals:
 
 private:
     friend class DocumentEditCommand;
+    friend class LayerEditCommand;
+    /// @brief 指定名が一意で空白・制御文字だけでないことを検証する。
+    /// @param name 前後の空白を除去した候補名。
+    /// @param except 名前変更時に重複判定から除外するUUID。
+    bool validLayerName(const QString &name,const QUuid &except = {}) const;
+    // m_layers: 文書が所有するデザインレイヤー一覧。初期状態でも1件存在する。
+    QList<DrawingLayer> m_layers;
+    // m_activeLayerId: 新規図形の所属先。必ず既存レイヤーを指す。
+    QUuid m_activeLayerId;
     /// @brief 有効な候補リストの差分を1操作として履歴へ追加し、表示へ通知する。
     /// @param next 描画順に並ぶ検証済みの確定候補。文書のUUIDは一意。
     /// @param text 操作を識別する日本語名。

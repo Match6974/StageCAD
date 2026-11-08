@@ -43,6 +43,8 @@ struct ShapeData {
     double rectangleAngleDeg = 0;
     // polygonClosed: 頂点列の終点と始点を結ぶかどうか。既存図形は閉じた状態。
     bool polygonClosed = true;
+    // layerId: 所属レイヤーのUUID。文書が所属の存在を検証し、単体形状の検証では扱わない。
+    QUuid layerId;
     /// @brief 四角形の左下周りの回転変換を返す。配置移動量は含めない。
     QTransform rectangleTransform() const;
     /// @brief 指定基準点を実寸座標で返す。四角形は回転後、多角形は外接矩形を使う。

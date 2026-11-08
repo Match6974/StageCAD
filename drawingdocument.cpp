@@ -22,7 +22,7 @@ bool samePoint(QPointF a,QPointF b) { return a.x() == b.x() && a.y() == b.y(); }
 /// @param b 比較先の図形。
 bool sameShape(const ShapeData &a,const ShapeData &b)
 {
-    if (a.id != b.id || a.kind() != b.kind() || a.rectangleAngleDeg != b.rectangleAngleDeg
+    if (a.id != b.id || a.layerId != b.layerId || a.kind() != b.kind() || a.rectangleAngleDeg != b.rectangleAngleDeg
         || a.polygonClosed != b.polygonClosed) return false;
     if (const auto *line = std::get_if<QLineF>(&a.geometryMm)) {
         // other: 配置を加えて端点比較する第2の線分。
@@ -151,10 +151,151 @@ private:
     QList<Change> m_changes;
 };
 
+/// @brief レイヤーの追加・名前変更を共通の文書履歴へ記録する。履歴スタックが所有する。
+class LayerEditCommand : public QUndoCommand {
+public:
+    /// @brief 対象レイヤーの前後値と、新規追加前のアクティブUUIDを保持する。
+    /// @param document コマンドを所有する文書。
+    /// @param before 変更前の値。空の場合はレイヤー追加。
+    /// @param after 追加・変更後の値。
+    LayerEditCommand(DrawingDocument *document,std::optional<DrawingLayer> before,DrawingLayer after)
+        : QUndoCommand(before ? QObject::tr("レイヤーを変更") : QObject::tr("レイヤーを追加")),
+          m_document(document),m_before(before),m_after(after),m_previousActive(document->activeLayerId()) {}
+    /// @brief 変更前の名前へ戻す。追加を取り消す場合は元のアクティブレイヤーへ戻す。
+    void undo() override {
+        emit m_document->aboutToChange();
+        if (m_before) replace(*m_before);
+        else {
+            m_document->m_layers.erase(std::remove_if(m_document->m_layers.begin(),m_document->m_layers.end(),
+                // data: 追加を取り消す対象のレイヤー。
+                [this](const DrawingLayer &data) { return data.id == m_after.id; }),m_document->m_layers.end());
+            if (m_document->m_activeLayerId == m_after.id)
+                m_document->m_activeLayerId = m_document->layer(m_previousActive) ? m_previousActive : m_document->m_layers.first().id;
+        }
+        emit m_document->layersChanged();
+    }
+    /// @brief 属性を再適用し、追加時は新しいレイヤーをアクティブにする。
+    void redo() override {
+        emit m_document->aboutToChange();
+        if (m_before) replace(m_after);
+        else { m_document->m_layers.append(m_after); m_document->m_activeLayerId = m_after.id; }
+        emit m_document->layersChanged();
+    }
+private:
+    /// @brief UUID・順番・表示状態を保ち、対象の名前だけを置き換える。
+    /// @param value 復元する名前を持つレイヤー値。
+    void replace(const DrawingLayer &value) {
+        // data: 同じUUIDを持つレイヤー。
+        for (auto &data : m_document->m_layers) if (data.id == value.id) { data.name = value.name; break; }
+    }
+    // m_document: 履歴を所有し、このコマンドより長く存在する文書。
+    DrawingDocument *m_document;
+    // m_before: 編集前のレイヤー。追加の場合は空。
+    std::optional<DrawingLayer> m_before;
+    // m_after: 追加・編集後のレイヤー属性。
+    DrawingLayer m_after;
+    // m_previousActive: 追加取り消し時の復帰先UUID。
+    QUuid m_previousActive;
+};
+
+/// @brief 指定UUIDのレイヤーをコピーで返す。
+/// @param id 検索するUUID。
+std::optional<DrawingLayer> DrawingDocument::layer(const QUuid &id) const {
+    // data: 文書が保持する各レイヤー。
+    for (const auto &data : m_layers) if (data.id == id) return data;
+    return std::nullopt;
+}
+/// @brief 名前を大文字小文字を区別せず重複検証し、制御文字を拒否する。
+/// @param name 検証する名前。
+/// @param except 名前変更対象として除外するUUID。
+bool DrawingDocument::validLayerName(const QString &name,const QUuid &except) const {
+    if (name.isEmpty()) return false;
+    // character: 改行等を名前へ混入させないために確認する文字。
+    for (const auto character : name) if (character.category() == QChar::Other_Control) return false;
+    // data: 名前の重複を調べる既存レイヤー。
+    for (const auto &data : m_layers) if (data.id != except && data.name.compare(name,Qt::CaseInsensitive) == 0) return false;
+    return true;
+}
+/// @brief 自動採番または明示名を検証し、作成を1件の履歴として登録する。
+/// @param name 空なら自動採番、それ以外は明示的な名前。
+QUuid DrawingDocument::addLayer(const QString &name) {
+    if (m_mutating) return {};
+    // nextName: 前後の空白を除去した候補名。
+    QString nextName = name.trimmed();
+    if (name.isEmpty()) {
+        // number: 未使用のデフォルト名を探す連番。
+        int number=1; do { nextName = tr("レイヤー%1").arg(number++); } while (!validLayerName(nextName));
+    }
+    if (!validLayerName(nextName)) return {};
+    // next: 新しく発行した安定UUIDを持つレイヤー。
+    const DrawingLayer next{QUuid::createUuid(),nextName,LayerVisibility::Visible};
+    // guard: 履歴登録中の再入を防止する。
+    QScopedValueRollback<bool> guard(m_mutating,true); m_history->push(new LayerEditCommand(this,std::nullopt,next)); return next.id;
+}
+/// @brief 同じレイヤーUUIDを保持して名前だけを履歴へ記録する。
+/// @param id 対象レイヤーUUID。
+/// @param name 指定された新しい名前。
+bool DrawingDocument::renameLayer(const QUuid &id,const QString &name) {
+    // before: 変更前の値のコピー。
+    const auto before = layer(id);
+    // nextName: 前後の空白を除去した名前。
+    const QString nextName = name.trimmed();
+    if (m_mutating || !before || !validLayerName(nextName,id)) return false;
+    if (before->name == nextName) return true;
+    // next: 変更する名前以外を維持した候補。
+    auto next = *before; next.name = nextName;
+    // guard: 履歴登録中の再入を防ぐ。
+    QScopedValueRollback<bool> guard(m_mutating,true); m_history->push(new LayerEditCommand(this,before,next)); return true;
+}
+
+/// @brief 新規作成を許可する通常表示のアクティブレイヤーがあるかを返す。
+bool DrawingDocument::canCreateShape() const {
+    // active: 現在の新規図形の所属先。
+    const auto active = layer(m_activeLayerId); return active && active->visibility == LayerVisibility::Visible;
+}
+/// @brief 通常表示のレイヤーに所属する図形だけ編集を許可する。
+/// @param id 対象図形UUID。
+bool DrawingDocument::canEditShape(const QUuid &id) const {
+    // data: 対象図形のコピー。
+    const auto data = shape(id);
+    // owner: 対象図形が所属するレイヤーのコピー。
+    const auto owner = data ? layer(data->layerId) : std::nullopt;
+    return owner && owner->visibility == LayerVisibility::Visible;
+}
+/// @brief レイヤーをアクティブにし、非表示・グレイなら通常表示へ戻す。
+/// @param id 対象レイヤーUUID。存在しなければ変更しない。
+bool DrawingDocument::setActiveLayer(const QUuid &id) {
+    // target: 切り替え先のレイヤーのコピー。
+    const auto target = layer(id);
+    if (m_mutating || !target) return false;
+    if (m_activeLayerId == id && target->visibility == LayerVisibility::Visible) return true;
+    // guard: 表示状態の通知中に別の文書操作を割り込ませない。
+    QScopedValueRollback<bool> guard(m_mutating,true); emit aboutToChange();
+    m_activeLayerId = target->id;
+    // data: 新しいアクティブを必ず通常表示にする対象。
+    for (auto &data : m_layers) if (data.id == target->id) data.visibility = LayerVisibility::Visible;
+    emit layersChanged(); return true;
+}
+/// @brief 表示設定だけを変更し、履歴を追加したりRedoを破棄したりしない。
+/// @param id 対象レイヤーUUID。
+/// @param visibility 通常・非表示・グレイの指定。
+bool DrawingDocument::setLayerVisibility(const QUuid &id,LayerVisibility visibility) {
+    // target: 存在・無変更を確認する対象のコピー。
+    const auto target = layer(id);
+    if (m_mutating || !target || (visibility != LayerVisibility::Visible && visibility != LayerVisibility::Hidden && visibility != LayerVisibility::Gray)) return false;
+    if (target->visibility == visibility) return true;
+    // guard: 状態変更と通知を一貫した1回の操作にする。
+    QScopedValueRollback<bool> guard(m_mutating,true); emit aboutToChange();
+    // data: 表示状態だけを変更する対象。
+    for (auto &data : m_layers) if (data.id == target->id) data.visibility = visibility;
+    emit layersChanged(); return true;
+}
+
 /// @brief 文書内で共通に使うQt標準の履歴スタックを作る。
 /// @param parent 文書を所有するQtの親。
 DrawingDocument::DrawingDocument(QObject *parent) : QObject(parent),m_history(new QUndoStack(this))
 {
+    m_layers.append({QUuid::createUuid(),tr("レイヤー1"),LayerVisibility::Visible}); m_activeLayerId = m_layers.first().id;
     connect(m_history,&QUndoStack::indexChanged,this,&DrawingDocument::historyChanged);
 }
 /// @brief コマンドが文書メンバーより先に破棄されるようにする。
@@ -202,9 +343,9 @@ std::optional<ShapeData> DrawingDocument::shape(const QUuid &id) const
 /// @param geometryMm 配置前の形状データ（実寸mm）。
 QUuid DrawingDocument::addShape(ShapeGeometry geometryMm)
 {
-    if (m_mutating) return {};
+    if (m_mutating || !canCreateShape()) return {};
     // data: 検証・追加・表示同期に使う図形データ。
-    ShapeData data{QUuid::createUuid(), std::move(geometryMm), {}};
+    ShapeData data{QUuid::createUuid(), std::move(geometryMm), {}}; data.layerId = m_activeLayerId;
     if (!data.isValid()) return {};
     // next: 追加後の描画順を保持する一時候補。
     auto next = m_shapes; next.append(data);
@@ -222,7 +363,7 @@ bool DrawingDocument::canTranslateShapes(const QList<QUuid> &ids, QPointF delta)
     for (const auto &id : ids) {
         // data: 検証・追加・表示同期に使う図形データ。
         auto data = shape(id);
-        if (!data) return false;
+        if (!data || !canEditShape(id)) return false;
         data->positionMm += delta;
         if (!data->isValid()) return false;
     }
@@ -250,7 +391,7 @@ bool DrawingDocument::removeShapes(const QList<QUuid> &ids)
 {
     if (m_mutating || ids.isEmpty()) return false;
     // id: 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
-    for (const auto &id : ids) if (!shape(id)) return false;
+    for (const auto &id : ids) if (!canEditShape(id)) return false;
     // unique: 重複を取り除いた対象UUIDの集合。
     const QSet<QUuid> unique(ids.cbegin(), ids.cend());
     // next: 指定した図形だけを除いた変更候補。
@@ -268,9 +409,9 @@ bool DrawingDocument::setLineEndpoints(const QUuid &id, const QLineF &lineMm)
     if (m_mutating) return false;
     // original: 現在の確定データのコピー。種類と変更前の実寸形状を確認する。
     const auto original = shape(id);
-    if (!original || original->kind() != ShapeKind::Line) return false;
+    if (!original || !canEditShape(id) || original->kind() != ShapeKind::Line) return false;
     // next: 実寸座標に統合した候補形状。配置を0にし、ローカル座標の範囲制限にも合わせる。
-    const ShapeData next{id, lineMm, {}};
+    ShapeData next = *original; next.geometryMm = lineMm; next.positionMm = {};
     if (!next.isValid()) return false;
     // current: 比較用の変更前の両端座標（実寸mm）。
     const QLineF current = std::get<QLineF>(original->geometryMm).translated(original->positionMm);
@@ -292,7 +433,7 @@ bool DrawingDocument::setRectangleBounds(const QUuid &id, const QRectF &boundsMm
     if (m_mutating) return false;
     // original: 種類と現在の配置を確認する、変更前の図形データのコピー。
     const auto original = shape(id);
-    if (!original || original->kind() != ShapeKind::Rectangle) return false;
+    if (!original || !canEditShape(id) || original->kind() != ShapeKind::Rectangle) return false;
     // next: 配置を実寸形状へ統合して検証する候補。通知中もUUIDを固定して保持する。
     ShapeData next = *original; next.geometryMm = boundsMm; next.positionMm = {};
     if (!next.isValid()) return false;
@@ -315,7 +456,7 @@ bool DrawingDocument::setCircleRadius(const QUuid &id, double radiusMm)
     if (m_mutating) return false;
     // original: 種類・中心・現在の半径を確認する、変更前の図形データのコピー。
     const auto original = shape(id);
-    if (!original || original->kind() != ShapeKind::Circle) return false;
+    if (!original || !canEditShape(id) || original->kind() != ShapeKind::Circle) return false;
     // circle: 現在のローカル中心・半径。配置移動量は中心へ加えて正本を更新する。
     const auto circle = std::get<CircleGeometry>(original->geometryMm);
     // next: 中心の実寸座標を保持した候補。配置移動量は0へ統合する。
@@ -339,7 +480,7 @@ bool DrawingDocument::updateShape(const ShapeData &candidate)
     const ShapeData next = candidate;
     // original: 同じ図形種類とUUIDを確認する変更前の値。
     const auto original = shape(next.id);
-    if (m_mutating || !original || original->kind() != next.kind() || !next.isValid()) return false;
+    if (m_mutating || !original || !canEditShape(next.id) || next.layerId != original->layerId || original->kind() != next.kind() || !next.isValid() || !layer(next.layerId)) return false;
     // shapes: 同じUUIDと描画位置を維持した変更候補。
     auto shapes = m_shapes;
     // data: 対象の形状だけを置き換える図形。

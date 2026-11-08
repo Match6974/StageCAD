@@ -12,6 +12,9 @@ qt_standard_project_setup()
 
 # アプリ本体とGUI回帰テストで共用する、手書きの実装・宣言ファイル。
 set(STAGECAD_SOURCES
+    drawinglayer.h
+    navigationpanel.h
+    navigationpanel.cpp
     rectangleanchorselector.h
     rectangleanchorselector.cpp
     objectinfopanel.h
@@ -152,7 +155,7 @@ if(BUILD_TESTING)
         SAMPLE_PDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf")
     target_link_libraries(stagecad_shutdown_probe PRIVATE Qt::Core Qt::Widgets Qt::Pdf Qt::PdfWidgets)
     # scenarioは終了時の操作状態名。状態ごとに別プロセスで破棄処理を検証する。
-    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft selected-shapes moving-shapes floating-object-info closed-object-info editing-line editing-rectangle editing-circle editing-polygon history)
+    foreach(scenario IN ITEMS empty pdf calibrated dialog picking canceled floating-palette closed-palette drawing-draft selected-shapes moving-shapes floating-object-info closed-object-info editing-line editing-rectangle editing-circle editing-polygon history floating-navigation closed-navigation editing-navigation)
         add_test(NAME shutdown_${scenario} COMMAND stagecad_shutdown_probe ${scenario})
         set_tests_properties(shutdown_${scenario} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)

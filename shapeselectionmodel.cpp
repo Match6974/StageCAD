@@ -12,6 +12,7 @@ ShapeSelectionModel::ShapeSelectionModel(DrawingDocument *document, QObject *par
     : QObject(parent), m_document(document)
 {
     if (!document) return;
+    connect(document,&DrawingDocument::layersChanged,this,&ShapeSelectionModel::pruneSelection);
     connect(document, &DrawingDocument::shapeRemoved, this, &ShapeSelectionModel::pruneSelection);
     // コールバック: 文書が破棄されたら弱い参照と残りの選択を解除する。
     connect(document, &QObject::destroyed, this, [this] { m_document = nullptr; clear(); });
@@ -25,7 +26,7 @@ QList<QUuid> ShapeSelectionModel::selectedIds() const
     if (m_document) {
         // shape: 文書が保持する確定済み図形。表示順に走査する。
         for (const auto &shape : m_document->shapes())
-            if (m_selectedIds.contains(shape.id)) ids.append(shape.id);
+            if (m_selectedIds.contains(shape.id) && m_document->canEditShape(shape.id)) ids.append(shape.id);
     }
     return ids;
 }
@@ -34,7 +35,7 @@ QList<QUuid> ShapeSelectionModel::selectedIds() const
 /// @param id 確認する図形UUID。
 bool ShapeSelectionModel::contains(const QUuid &id) const
 {
-    return m_selectedIds.contains(id) && m_document && m_document->shape(id).has_value();
+    return m_selectedIds.contains(id) && m_document && m_document->canEditShape(id);
 }
 
 /// @brief 単独選択の図形データをコピーして返す。選択状態を変更しない。
@@ -53,7 +54,7 @@ bool ShapeSelectionModel::setSelectedIds(const QList<QUuid> &ids)
     QSet<QUuid> next;
     // id: 呼び出し元が選択を要求した図形UUID。
     for (const auto &id : ids) {
-        if (!m_document || !m_document->shape(id)) return false;
+        if (!m_document || !m_document->canEditShape(id)) return false;
         next.insert(id);
     }
     if (next == m_selectedIds) return true;
@@ -69,7 +70,7 @@ bool ShapeSelectionModel::selectOnly(const QUuid &id) { return setSelectedIds({i
 /// @param id 追加または解除する図形UUID。
 bool ShapeSelectionModel::toggle(const QUuid &id)
 {
-    if (!m_document || !m_document->shape(id)) return false;
+    if (!m_document || !m_document->canEditShape(id)) return false;
     // next: 現在選択へ1件の追加・解除を適用する下書き。
     auto next = m_selectedIds;
     if (next.contains(id)) next.remove(id); else next.insert(id);

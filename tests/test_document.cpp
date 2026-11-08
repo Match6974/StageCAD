@@ -12,6 +12,58 @@
 class DocumentTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 初期レイヤー・追加採番・名前検証・所属UUIDとレイヤー履歴を検証する。
+    void layerIdentityAndHistory() {
+        // document: 常に1つ以上のレイヤーを所有する文書。
+        DrawingDocument document; QCOMPARE(document.layers().size(),1); QCOMPARE(document.layers().first().name,QString("レイヤー1"));
+        // first: 初期のアクティブレイヤーUUID。
+        const auto first = document.activeLayerId();
+        // existing: レイヤー追加前から存在する図形UUID。
+        const auto existing = document.addShape(QLineF(0,0,10,0)); QCOMPARE(document.shape(existing)->layerId,first);
+        // second: 採番した新規アクティブレイヤーのUUID。
+        const auto second = document.addLayer(); QVERIFY(!second.isNull()); QCOMPARE(document.activeLayerId(),second);
+        QCOMPARE(document.layer(second)->name,QString("レイヤー2"));
+        // shape: 新規レイヤーに作成した図形。
+        const auto shape = document.addShape(QLineF(20,0,30,0)); QCOMPARE(document.shape(shape)->layerId,second);
+        QVERIFY(document.setLineEndpoints(shape,QLineF(20,0,40,0))); QCOMPARE(document.shape(shape)->layerId,second);
+        QVERIFY(document.renameLayer(second,"照明")); QCOMPARE(document.layer(second)->name,QString("照明"));
+        QVERIFY(!document.renameLayer(second,"レイヤー1")); QVERIFY(!document.renameLayer(second,"  ")); QVERIFY(!document.renameLayer(second,"照明\n回路"));
+        QVERIFY(document.addLayer("レイヤー1").isNull()); QVERIFY(document.addLayer("   ").isNull());
+        QVERIFY(document.undo()); QCOMPARE(document.layer(second)->name,QString("レイヤー2"));
+        QVERIFY(document.undo()); QCOMPARE(std::get<QLineF>(document.shape(shape)->geometryMm).length(),10.0);
+        QVERIFY(document.undo()); QVERIFY(!document.shape(shape)); QVERIFY(document.undo());
+        QCOMPARE(document.layers().size(),1); QCOMPARE(document.activeLayerId(),first); QCOMPARE(document.shape(existing)->layerId,first);
+        QVERIFY(document.redo()); QCOMPARE(document.activeLayerId(),second); QVERIFY(document.redo()); QCOMPARE(document.shape(shape)->layerId,second);
+    }
+    /// @brief 表示・グレイ・非表示の編集制御と、ビュー操作がRedoを壊さないことを検証する。
+    void layerVisibilityGuards() {
+        // document: 複数レイヤーの図形を保持する文書。
+        DrawingDocument document;
+        // first: 既存レイヤーのUUID。a: このレイヤーに所属する図形。
+        const auto first = document.activeLayerId();
+        const auto a = document.addShape(QRectF(0,0,20,20));
+        // second: 新規レイヤーのUUID。b: その上に作成する図形。
+        const auto second = document.addLayer();
+        const auto b = document.addShape(CircleGeometry{{50,0},10});
+        QVERIFY(document.setActiveLayer(first)); QVERIFY(document.canEditShape(b));
+        QVERIFY(document.setLayerVisibility(second,LayerVisibility::Gray)); QVERIFY(!document.canEditShape(b));
+        QVERIFY(!document.translateShapes({a,b},{10,0})); QVERIFY(!document.removeShapes({b}));
+        QVERIFY(!document.setCircleRadius(b,20));
+        // candidate: UI外からの更新もグレイ表示では拒否する候補。
+        auto candidate = *document.shape(b); candidate.positionMm = {10,0}; QVERIFY(!document.updateShape(candidate));
+        QVERIFY(document.setLayerVisibility(first,LayerVisibility::Hidden)); QVERIFY(!document.canCreateShape());
+        QVERIFY(document.addShape(QLineF(0,0,10,0)).isNull());
+        QVERIFY(document.setActiveLayer(first)); QCOMPARE(document.layer(first)->visibility,LayerVisibility::Visible);
+        QVERIFY(document.setActiveLayer(second)); QCOMPARE(document.layer(second)->visibility,LayerVisibility::Visible);
+        QVERIFY(document.setCircleRadius(b,20)); QVERIFY(document.undo()); QVERIFY(document.canRedo());
+        QVERIFY(document.setLayerVisibility(second,LayerVisibility::Hidden)); QVERIFY(document.canRedo());
+        QVERIFY(document.renameLayer(second,"照明")); QVERIFY(!document.canRedo());
+        QVERIFY(document.undo()); QCOMPARE(document.layer(second)->visibility,LayerVisibility::Hidden);
+        QVERIFY(document.redo()); QCOMPARE(document.layer(second)->name,QString("照明"));
+        QVERIFY(!document.setLayerVisibility(QUuid::createUuid(),LayerVisibility::Visible));
+        QVERIFY(!document.setLayerVisibility(first,static_cast<LayerVisibility>(99)));
+        QVERIFY(!document.setActiveLayer(QUuid::createUuid()));
+    }
     /// @brief 作成・編集・複数移動・削除のUndo／Redoで正確な値と描画順を復元する。
     void historyRestoresValuesIdsAndOrder() {
         // document: 一連の確定操作の履歴を所有する文書。

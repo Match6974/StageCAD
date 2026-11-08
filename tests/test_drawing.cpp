@@ -11,6 +11,9 @@
 #include "toolpalette.h"
 #include "pdfplacement.h"
 #include "objectinfopanel.h"
+#include "navigationpanel.h"
+#include <QTreeWidget>
+#include <QHeaderView>
 #include "rectangleanchorselector.h"
 #include <QGraphicsRectItem>
 #include <QDockWidget>
@@ -440,6 +443,82 @@ private slots:
         QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({rectangle}));
         QVERIFY(document->shape(circle));
         if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step3-undo-redo.png"));
+    }
+    /// @brief ナビゲーションの実操作で追加・名前・表示・作成先と図形所属を検証する。
+    void layerNavigationIntegration() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        // startup: 起動時のPDF選択を閉じるタイマー。
+        QTimer startup;
+        // コールバック: 空の作業領域でレイヤーと図形の連携を検証する。
+        connect(&startup,&QTimer::timeout,[] {
+            // widget: 起動中のトップレベル画面。
+            for (auto *widget : QApplication::topLevelWidgets())
+                // dialog: 起動時に取り消すファイル選択。
+                if (auto *dialog = qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+        });
+        startup.start(20);
+        // window: ナビゲーションと情報パレットを表示するメイン画面。
+        MainWindow window; startup.stop(); window.show(); QTest::qWait(10);
+        // view: レイヤーごとの図形を表示するCADビュー。
+        auto *view = window.findChild<DrawingView*>();
+        // document: レイヤー・図形の正本。
+        auto *document = view->document();
+        // navigation: レイヤー操作のパネル。
+        auto *navigation = window.findChild<NavigationPanel*>(); QVERIFY(navigation);
+        // list: UUIDを保持する4列の一覧。
+        auto *list = navigation->findChild<QTreeWidget*>("layerList"); QVERIFY(list);
+        QCOMPARE(list->topLevelItemCount(),1); QCOMPARE(list->topLevelItem(0)->text(2),QString("レイヤー1"));
+        // first: 初期レイヤーUUID。rectangle: 初期レイヤーの図形UUID。
+        const auto first = document->activeLayerId();
+        const auto rectangle = document->addShape(QRectF(-60,-20,40,40));
+        QTest::mouseClick(navigation->findChild<QPushButton*>("addLayerButton"),Qt::LeftButton);
+        QCOMPARE(list->topLevelItemCount(),2);
+        // second: 追加したアクティブレイヤーUUID。circle: そこに作成する図形UUID。
+        const auto second = document->activeLayerId(); QVERIFY(second != first);
+        const auto circle = document->addShape(CircleGeometry{{40,0},15}); QCOMPARE(document->shape(circle)->layerId,second);
+        // cell: 対象セルの中央をクリックする画面位置生成器。
+        // row: レイヤー行。column: 表示状態・作成先・名前の列番号。
+        const auto cell = [list](int row,int column) { return QPoint(list->header()->sectionViewportPosition(column)+list->header()->sectionSize(column)/2,list->visualItemRect(list->topLevelItem(row)).center().y()); };
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(0,1)); QCOMPARE(document->activeLayerId(),first);
+        QVERIFY(view->selectionModel()->selectOnly(circle));
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,0));
+        QCOMPARE(document->layer(second)->visibility,LayerVisibility::Hidden); QVERIFY(!view->shapeItems().last()->isVisible());
+        QVERIFY(view->selectionModel()->selectedIds().isEmpty());
+        QVERIFY(window.findChild<QLineEdit*>("edit_radius")->text().isEmpty());
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,0));
+        QCOMPARE(document->layer(second)->visibility,LayerVisibility::Gray); QVERIFY(view->shapeItems().last()->isVisible());
+        QVERIFY(!view->selectionModel()->selectOnly(circle));
+        QCOMPARE(qgraphicsitem_cast<QGraphicsEllipseItem*>(view->shapeItems().last())->pen().color(),QColor("#999999"));
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene({40,0})); QVERIFY(view->selectedShapeItems().isEmpty());
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,1));
+        QCOMPARE(document->activeLayerId(),second); QCOMPARE(document->layer(second)->visibility,LayerVisibility::Visible);
+        QVERIFY(view->selectionModel()->selectOnly(rectangle));
+        QVERIFY(document->setRectangleBounds(rectangle,QRectF(-60,-20,50,40))); // 通常表示なら非アクティブでも編集できる。
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,0));
+        QVERIFY(!document->canCreateShape()); view->setActiveTool(DrawingTool::Line); QVERIFY(!view->submitDrawingPoint({0,0}));
+        QVERIFY(!window.findChild<QWidget*>("drawingPointPanel")->isEnabled());
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,1));
+        QVERIFY(view->submitDrawingPoint({0,60})); QVERIFY(view->submitDrawingPoint({40,60}));
+        QCOMPARE(document->shapes().last().layerId,second);
+        QVERIFY(view->submitDrawingPoint({0,80})); QCOMPARE(view->draftPointCount(),1);
+        QVERIFY(document->setActiveLayer(first)); QCOMPARE(view->draftPointCount(),0); QVERIFY(document->setActiveLayer(second));
+        // editor: レイヤー名のダブルクリックで開くインライン入力欄。
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,2));
+        QTest::mouseDClick(list->viewport(),Qt::LeftButton,Qt::NoModifier,cell(1,2));
+        QTRY_VERIFY(list->findChild<QLineEdit*>());
+        auto *editor = list->findChild<QLineEdit*>(); editor->setText(QString::fromUtf8("照明")); QTest::keyClick(editor,Qt::Key_Return);
+        QTRY_COMPARE(document->layer(second)->name,QString("照明")); QCOMPARE(document->shape(circle)->layerId,second);
+        QVERIFY(document->undo()); QCOMPARE(list->topLevelItem(1)->text(2),QString("レイヤー2"));
+        QVERIFY(document->redo()); QCOMPARE(list->topLevelItem(1)->text(2),QString("照明"));
+        list->topLevelItem(1)->setText(2,QString("レイヤー1"));
+        QCOMPARE(document->layer(second)->name,QString("照明"));
+        QVERIFY(!navigation->findChild<QLabel*>("layerError")->text().isEmpty());
+        // dock: 閉じても表示メニューから再表示できるナビゲーションドック。
+        auto *dock = window.findChild<QDockWidget*>("navigationDock"); dock->close(); dock->toggleViewAction()->trigger(); QVERIFY(dock->isVisible());
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) QVERIFY(window.grab().save("step4-layers.png"));
+        QVERIFY(window.importPdf(QString::fromUtf8(SAMPLE_PDF_PATH)));
+        window.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(1); QVERIFY(!navigation->isEnabled());
+        window.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0); QVERIFY(navigation->isEnabled());
     }
     /// @brief UUIDの正本からの表示同期、通知の一意性、移動中の選択変更を検証する。
     void selectionIdsDriveDisplayAndNotifications() {

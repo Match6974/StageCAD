@@ -151,6 +151,12 @@ DrawingView::DrawingView(DrawingSettings *settings, QWidget *parent)
     connect(m_document,&DrawingDocument::historyAboutToRestore,this,[this] {
         endShapeMove(false); cancelDrawing(); m_panning = false; m_selectionMenu->hide(); updateInteractionCursor();
     });
+    // コールバック: レイヤー変更で未確定描画を破棄し、表示・色・選択可否を同期する。
+    connect(m_document,&DrawingDocument::layersChanged,this,[this] {
+        endShapeMove(false); cancelDrawing();
+        // data: 表示属性を再適用する確定図形。
+        for (const auto &data : m_document->shapes()) syncShape(data.id);
+    });
     connect(m_document, &DrawingDocument::shapeAdded, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeChanged, this, &DrawingView::syncShape);
     connect(m_document, &DrawingDocument::shapeRemoved, this, &DrawingView::removeShapeItem);
@@ -246,6 +252,7 @@ bool DrawingView::isDrawingTool() const
 QString DrawingView::drawingHint() const
 {
     if (!m_drawingEnabled) return tr("作業領域で描画ツールを選択してください。");
+    if (isDrawingTool() && !m_document->canCreateShape()) return tr("アクティブレイヤーを通常表示にするか、別のレイヤーを選んでください。");
     if (m_activeTool == DrawingTool::Selection)
         return tr("クリックで選択、Shiftで追加・解除。選択図形をドラッグで移動、Delか右クリックで削除、Escで解除します。");
     if (m_activeTool == DrawingTool::Pan) return tr("左ドラッグで画面を移動します。");
@@ -297,7 +304,7 @@ bool DrawingView::nearDraftVertex(QPointF point, QPointF vertex) const
 /// @param constrainLine 直線の終点にShift相当の角度制限を適用するかどうか。
 bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
 {
-    if (!m_drawingEnabled || m_picking || m_panning || !isDrawingTool()) return false;
+    if (!m_drawingEnabled || !m_document->canCreateShape() || m_picking || m_panning || !isDrawingTool()) return false;
     if (!validPoint(point)) {
         emit drawingHintChanged(tr("座標は±10000000mm以内の有限の数値で指定してください。"));
         return false;
@@ -345,7 +352,7 @@ bool DrawingView::commitShape(QPointF second)
 /// @brief 現在の多角形を、測定やパンと競合せず有効な面として閉じられるかを返す。
 bool DrawingView::canFinishPolygon() const
 {
-    return m_drawingEnabled && !m_picking && !m_panning && m_activeTool == DrawingTool::Polygon && validPolygon(m_draftPoints);
+    return m_drawingEnabled && m_document->canCreateShape() && !m_picking && !m_panning && m_activeTool == DrawingTool::Polygon && validPolygon(m_draftPoints);
 }
 
 /// @brief 頂点順を保った多角形をモデルへ追加する。不成立なら作成途中の頂点を残す。
@@ -417,10 +424,22 @@ void DrawingView::syncShape(const QUuid &id)
         static_cast<OpenShapeItem<QGraphicsPolygonItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
+    // owner: 表示と編集可否を決める所属レイヤー。
+    const auto owner = m_document->layer(data->layerId);
+    // pen: グレイ参照では色だけを変え、画面線幅を維持するペン。
+    QPen pen = shapePen();
+    // brush: 通常の面表示または参照用の薄いグレイ塗り。
+    QBrush brush = shapeBrush();
+    if (owner && owner->visibility == LayerVisibility::Gray) { pen.setColor(QColor("#999999")); brush = QColor(160,160,160,35); }
+    if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) line->setPen(pen);
+    else if (auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(item)) { rect->setPen(pen); rect->setBrush(brush); }
+    else if (auto *ellipse = qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) { ellipse->setPen(pen); ellipse->setBrush(brush); }
+    else if (auto *polygon = qgraphicsitem_cast<QGraphicsPolygonItem*>(item)) { polygon->setPen(pen); polygon->setBrush(brush); }
+    item->setVisible(owner && owner->visibility != LayerVisibility::Hidden);
+    item->setFlag(QGraphicsItem::ItemIsSelectable,m_document->canEditShape(data->id));
     item->setTransform(data->rectangleTransform());
     item->setPos(data->positionMm);
     if (added) {
-        item->setFlag(QGraphicsItem::ItemIsSelectable);
         item->setData(ShapeIdRole, id); item->setData(ShapeToolRole, QVariant::fromValue(tool));
         m_shapeGraphics.insert(id, item); m_shapes.append(item);
     }
@@ -489,7 +508,7 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
         if (!item->isVisible()) continue;
         // data: 検証・追加・表示同期に使う図形データ。
         const auto data = m_document->shape(shapeId(item));
-        if (!data) continue;
+        if (!data || !m_document->canEditShape(data->id)) continue;
         // path: 実寸形状を画面座標へ変換した選択判定用パス（px）。
         const QPainterPath path = viewportTransform().map(data->localPath().translated(item->pos()));
         // filled: 選択判定で線の近傍だけでなく面の内部も対象にするかどうか。
@@ -714,7 +733,7 @@ void DrawingView::mouseMoveEvent(QMouseEvent *event)
         if (m_pickKind == DistanceKind::Target || m_pdfBounds.contains(point)) m_hover = point;
         else m_hover.reset();
         viewport()->update();
-    } else if (m_drawingEnabled && isDrawingTool()) {
+    } else if (m_drawingEnabled && m_document->canCreateShape() && isDrawingTool()) {
         if (m_drawPressed && (event->pos() - m_pressPosition).manhattanLength() >= QApplication::startDragDistance())
             m_dragged = true;
         m_draftHover = validPoint(point) ? std::optional<QPointF>(point) : std::nullopt;
@@ -781,7 +800,7 @@ void DrawingView::mousePressEvent(QMouseEvent *event)
         }
         event->accept(); return;
     }
-    if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
+    if (m_drawingEnabled && m_document->canCreateShape() && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_ignoreDrawingRelease = false;
         m_pressPosition = event->pos(); m_dragged = false; m_drawPressed = true;
         setFocus(); event->accept(); return;
@@ -804,7 +823,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
         if (event->button() == Qt::LeftButton && m_ignoreDrawingRelease) {
             m_ignoreDrawingRelease = false; m_drawPressed = false; event->accept(); return;
         }
-        if (m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
+        if (m_drawingEnabled && m_document->canCreateShape() && isDrawingTool() && event->button() == Qt::LeftButton) {
             // pressed: 対応する描画用押下が先に受け付けられていたかどうか。
             const bool pressed = m_drawPressed; m_drawPressed = false;
             event->accept();
@@ -852,7 +871,7 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
 void DrawingView::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (!m_picking && m_activeTool == DrawingTool::Selection) { event->accept(); return; }
-    if (!m_picking && m_drawingEnabled && isDrawingTool() && event->button() == Qt::LeftButton) {
+    if (!m_picking && m_drawingEnabled && m_document->canCreateShape() && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_drawPressed = false; m_ignoreDrawingRelease = true;
         if (m_activeTool == DrawingTool::Polygon && !m_draftPoints.isEmpty()) {
             // point: 用紙中心基準の実寸座標（mm）。

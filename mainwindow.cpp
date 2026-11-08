@@ -10,6 +10,7 @@
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
 #include "objectinfopanel.h"
+#include "navigationpanel.h"
 #include "scaledialog.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
@@ -177,6 +178,16 @@ MainWindow::MainWindow(QWidget *parent)
     infoDock->setWidget(m_objectInfoPanel); addDockWidget(Qt::RightDockWidgetArea, infoDock);
     resizeDocks({infoDock}, {260}, Qt::Horizontal);
     viewMenu->addAction(infoDock->toggleViewAction());
+    // navigationDock: オブジェクト情報の下に配置するレイヤーナビゲーション。
+    auto *navigationDock = new QDockWidget(tr("ナビゲーション"),this);
+    navigationDock->setObjectName("navigationDock"); navigationDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+    m_navigationPanel = new NavigationPanel(m_drawingView->document(),m_drawingSettings,navigationDock);
+    navigationDock->setWidget(m_navigationPanel); addDockWidget(Qt::RightDockWidgetArea,navigationDock);
+    splitDockWidget(infoDock,navigationDock,Qt::Vertical);
+    resizeDocks({infoDock,navigationDock},{440,240},Qt::Vertical);
+    viewMenu->addAction(navigationDock->toggleViewAction());
+    connect(m_drawingView->document(),&DrawingDocument::layersChanged,this,&MainWindow::updatePdfActions);
+
 
     addToolBarBreak(Qt::TopToolBarArea);
     m_toolOptionsToolbar = addToolBar(tr("ツール"));
@@ -445,6 +456,7 @@ void MainWindow::updatePdfActions()
     m_drawingView->setDrawingEnabled(idle && workspace);
     m_selectionStatus->setVisible(workspace);
     m_objectInfoPanel->setEnabled(idle && workspace);
+    m_navigationPanel->setEnabled(idle && workspace);
     updateDrawingControls();
     m_toolPalette->setEnabled(idle && workspace);
     m_toolOptionsToolbar->setEnabled(idle && workspace);
@@ -467,7 +479,7 @@ void MainWindow::updateDrawingControls()
     const bool shapeTool = tool == DrawingTool::Line || tool == DrawingTool::Rectangle
         || tool == DrawingTool::Circle || tool == DrawingTool::Polygon;
     m_pointInputPanel->setVisible(shapeTool);
-    m_pointInputPanel->setEnabled(shapeTool && m_drawingView->drawingEnabled() && !m_drawingView->isPickingDistance());
+    m_pointInputPanel->setEnabled(shapeTool && m_drawingView->document()->canCreateShape() && m_drawingView->drawingEnabled() && !m_drawingView->isPickingDistance());
     m_finishPolygonButton->setVisible(tool == DrawingTool::Polygon);
     m_finishPolygonButton->setEnabled(m_drawingView->canFinishPolygon());
 }
@@ -519,5 +531,7 @@ MainWindow::~MainWindow()
 {
     // 子ビューの派生クラス破棄後にモデル破棄通知から頂点マーカーを操作させない。
     disconnect(m_objectInfoPanel,nullptr,m_drawingView,nullptr);
+    // インライン編集の終了が子の破棄中に発生しても、破棄済みのMainWindowへ通知しない。
+    disconnect(m_drawingView->document(),nullptr,this,nullptr);
     delete ui;
 }

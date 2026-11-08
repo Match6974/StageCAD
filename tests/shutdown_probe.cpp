@@ -6,6 +6,7 @@
 #include "mainwindow.h"
 #include "drawingview.h"
 #include "drawingdocument.h"
+#include <QTreeWidget>
 #include "shapeselectionmodel.h"
 #include "pdfcalibrationdialog.h"
 #include "pdfplacement.h"
@@ -169,6 +170,22 @@ int main(int argc, char **argv)
             const auto id = view->document()->addShape(CircleGeometry{{0,0},10});
             view->document()->setCircleRadius(id,20); view->document()->removeShapes({id});
             view->document()->undo(); view->selectionModel()->selectOnly(id);
+        }
+        if (scenario == "floating-navigation" || scenario == "closed-navigation") {
+            // view: 複数レイヤーの履歴を保持したまま終了するCADビュー。
+            auto *view = w.findChild<DrawingView*>();
+            view->document()->addLayer(); view->document()->addShape(CircleGeometry{{0,0},10});
+            // dock: 切り離し・非表示でも文書の寿命を安全に監視するナビゲーション。
+            auto *dock = w.findChild<QDockWidget*>("navigationDock");
+            if (scenario == "floating-navigation") dock->setFloating(true); else dock->close();
+        }
+        if (scenario == "editing-navigation") {
+            // view: レイヤー名編集と履歴の参照先を保持するビュー。
+            auto *view = w.findChild<DrawingView*>(); view->document()->addLayer();
+            // list: 名前編集中のまま閉じるツリー。
+            auto *list = w.findChild<QTreeWidget*>("layerList"); list->editItem(list->topLevelItem(1),2);
+            // editor: Enter未確定の名前を残すインライン入力欄。
+            if (auto *editor = list->findChild<QLineEdit*>()) editor->setText("Pending name");
         }
         if (!w.close()) app.exit(6);
     });
