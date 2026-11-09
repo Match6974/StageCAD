@@ -29,14 +29,25 @@ struct CircleGeometry {
     double sweepAngleDeg = 360;
 };
 /// 形状を直線・矩形・円／円弧・頂点列のいずれか1種類として保持する共用型。
-/// @brief 文字属性と、GUIスレッドで生成した1emの字形を保持する。フォントサイズと表示倍率を分離する。
+/// @brief 各行の水平揃えとAlignment Pointの水平位置を表す。幅指定・両端揃えは含まない。
+enum class TextHorizontalAlignment { Left, Center, Right }; // 左・中央・右に対応する。
+/// @brief Alignment Pointの垂直位置。ベースラインは先頭行を指す。
+enum class TextVerticalAlignment { Top, FirstBaseline, Center, Bottom }; // 上・先頭行ベースライン・中央・下。
+/// @brief 文字の揃えがサポートする値かを判定する。不正な列挙値は拒否する。
+/// @param horizontal 水平揃え。
+/// @param vertical 垂直基準。
+bool validTextAlignment(TextHorizontalAlignment horizontal,TextVerticalAlignment vertical);
+/// @brief 文字属性と、GUIスレッドで生成した1emの字形を保持する。設定ptと配置点を保持し、レイヤー縮尺で実寸へ換算する。
 struct TextGeometry {
     QString text; // 改行を含む文字列。HTMLではない。
     QString fontFamily; // 試作版の固定フォント名。
-    double pointSizePt = 12; // 設定サイズ（pt）。縮尺操作では変更しない。
-    QPointF anchorMm; // 行ボックス左上の実寸位置（mm）。
-    QPainterPath unitPath; // 1em、Y上向きの字形。背景は含まない。
-    QRectF unitBounds; // 空白と改行を含む1emの行ボックス。
+    double pointSizePt = 12; // 実際の設定サイズ（pt）。スケールテキストONでは縮尺比で変更する。
+    QPointF anchorMm; // 水平・垂直揃えで決まるAlignment Pointの実寸座標（mm）。
+    QPainterPath unitPath; // Alignment Point原点の1em、Y上向きの字形。背景は含まない。
+    QRectF unitBounds; // Alignment Pointを原点とする、空白と改行を含む1emの行ボックス。
+    TextHorizontalAlignment horizontalAlignment = TextHorizontalAlignment::Left; // 各行の水平揃え。初期は左。
+    TextVerticalAlignment verticalAlignment = TextVerticalAlignment::Top; // 垂直基準。初期は上。
+
 };
 /// @brief 図形と文字の形状を値として保持する。
 using ShapeGeometry = std::variant<QLineF, QRectF, CircleGeometry, QPolygonF, TextGeometry>;
@@ -58,7 +69,7 @@ struct ShapeData {
     QUuid layerId;
     /// @brief 四角形の左下周りの回転変換を返す。配置移動量は含めない。
     QTransform rectangleTransform() const;
-    /// @brief 指定基準点を実寸座標で返す。四角形は回転後、多角形は外接矩形を使う。
+    /// @brief 指定基準点を実寸座標で返す。四角形は回転後、多角形は外接矩形、文字は選択済みのAlignment Pointを使う。
     /// @param fraction 左下(0,0)から右上(1,1)の相対位置。
     QPointF referencePoint(QPointF fraction) const;
     /// @brief 面を持つ図形かを返す。開いた多角形と円弧は線として扱う。

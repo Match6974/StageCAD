@@ -14,6 +14,7 @@
 #include "scaledialog.h"
 #include "texteditdialog.h"
 #include "textlayout.h"
+#include "textalignmenteditor.h"
 #include <QComboBox>
 #include <limits>
 #include "pdfcalibrationdialog.h"
@@ -246,6 +247,8 @@ MainWindow::MainWindow(QWidget *parent)
     textPresets->setObjectName("textToolbarSizePresets"); textPresets->addItem(tr("定型サイズ"));
     for (int size : {4,6,7,8,9,10,11,12,14,18,20,24,28,36,48,72,96,144}) textPresets->addItem(tr("%1 pt").arg(size),size); // CSVの候補（pt）。
     textLayout->addWidget(m_textSizeInput); textLayout->addWidget(m_textUnit); textLayout->addWidget(textPresets);
+    m_textAlignment=new TextAlignmentEditor(m_textOptions); m_textAlignment->setObjectName("textToolbarAlignment");
+    textLayout->addWidget(m_textAlignment);
     m_toolOptionsToolbar->addWidget(m_textOptions);
     // コールバック: 次の作成サイズを更新する。既存文字は情報パレットから明示的に編集する。
     connect(m_textSizeInput,&QDoubleSpinBox::valueChanged,this,[this](double size) {
@@ -561,7 +564,7 @@ void MainWindow::editScale()
 
 /// @brief 文字の下書きを確定した場合だけ文書へ1操作を追加する。
 /// @param id 既存文字UUID。空の場合は新規作成する。
-/// @param anchorMm 新規文字の左上（実寸mm）。
+/// @param anchorMm 新規文字のAlignment Point（実寸mm）。
 void MainWindow::editText(const QUuid &id,QPointF anchorMm) {
     auto *document=m_drawingView->document(); // ビュー所有の正本モデル。
     const auto existing=document->shape(id); // モーダル操作中に参照が無効化しない値コピー。
@@ -570,15 +573,24 @@ void MainWindow::editText(const QUuid &id,QPointF anchorMm) {
     const auto targetLayer=document->activeLayerId(); // 新規入力開始時のレイヤー。
     const auto *oldText=existing ? std::get_if<TextGeometry>(&existing->geometryMm) : nullptr; // コピー内の属性参照。
     TextEditDialog dialog(oldText ? oldText->text : QString(),oldText ? oldText->pointSizePt : m_textPointSize,fixedTextFontFamily(),this);
+    dialog.setAlignment(oldText ? oldText->horizontalAlignment : m_textAlignment->horizontalAlignment(),
+        oldText ? oldText->verticalAlignment : m_textAlignment->verticalAlignment()); // 新規は表示バー、編集は対象文字の揃えを引き継ぐ。
+    dialog.setSizeUnitIndex(m_textUnit->currentIndex()); // 開く時点の表示バーの単位を引き継ぐ。
+    // コールバック: 単位の選択は表示設定として即時共有し、文字入力を取り消しても保持する。
+    connect(&dialog,&TextEditDialog::sizeUnitChanged,m_textUnit,&QComboBox::setCurrentIndex);
+    connect(m_textUnit,&QComboBox::currentIndexChanged,&dialog,&TextEditDialog::setSizeUnitIndex);
     while (dialog.exec() == QDialog::Accepted) {
-        const auto geometry=makeTextGeometry(dialog.text(),dialog.pointSize(),oldText ? oldText->anchorMm : anchorMm); // 設定値から字形を生成する。
+        const auto geometry=makeTextGeometry(dialog.text(),dialog.pointSize(),oldText ? oldText->anchorMm : anchorMm,dialog.horizontalAlignment(),dialog.verticalAlignment()); // 設定値から字形を生成する。
         bool applied=false; // 不正候補は文書と履歴を変更しない。
         if (geometry && existing) {
-            ShapeData next=*existing; // 配置・UUID・所属と表示倍率を維持する。
+            ShapeData next=*existing; // Alignment Point・配置・UUID・所属を維持する。
             next.geometryMm=*geometry; applied=document->updateShape(next);
         } else if (geometry && document->activeLayerId() == targetLayer) applied=!document->addShape(*geometry).isNull();
         if (applied) {
-            if (!existing) m_textPointSize=dialog.pointSize();
+            if (!existing) {
+                m_textPointSize=dialog.pointSize(); // 新規作成で確定した値を次回へ引き継ぐ。
+                m_textAlignment->setAlignment(dialog.horizontalAlignment(),dialog.verticalAlignment());
+            }
             const QSignalBlocker block(m_textSizeInput); // 次の入力サイズ表示の更新ではモデルを変更しない。
             m_textSizeInput->setValue(m_textPointSize/m_textUnit->currentData().toDouble());
             return;

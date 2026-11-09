@@ -115,7 +115,7 @@ QPen shapePen()
 QBrush shapeBrush() { return QColor(95, 155, 215, 65); }
 }
 
-/// @brief 図面の拡大率に関係なく、選択頂点を小さな丸で示す。
+/// @brief 図面の拡大率に関係なく、選択頂点または文字の基準点を小さな丸で示す。
 /// @param point マーカーの実寸座標（mm）。
 /// @param visible マーカーの表示状態。
 void DrawingView::highlightVertex(QPointF point,bool visible)
@@ -270,7 +270,7 @@ QString DrawingView::drawingHint() const
     if (m_activeTool == DrawingTool::Selection)
         return tr("クリックで選択、Shiftで追加・解除。選択図形をドラッグで移動、Delか右クリックで削除、Escで解除します。");
     if (m_activeTool == DrawingTool::Pan) return tr("左ドラッグで画面を移動します。");
-    if (m_activeTool == DrawingTool::Text) return tr("文字の左上位置を指定してください。横書きで入力します。");
+    if (m_activeTool == DrawingTool::Text) return tr("文字の基準点（Alignment Point）を指定してください。横書きで入力します。");
     if (m_activeTool == DrawingTool::Polygon)
         return m_draftPoints.isEmpty() ? tr("最初の頂点を指定してください。")
             : tr("頂点を追加します。始点か終点のダブルクリックで完了。Delで1点戻り、Escで中止します。");

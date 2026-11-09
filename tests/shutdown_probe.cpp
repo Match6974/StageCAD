@@ -202,15 +202,16 @@ int main(int argc, char **argv)
         if (scenario == "text-selected" || scenario == "text-dialog") {
             w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
             auto *view=w.findChild<DrawingView*>(); // 文字の表示・選択・履歴を所有するビュー。
-            const auto text=makeTextGeometry(QString::fromUtf8("照明\n音響"),12,{-30,30}); // 固定フォントの日本語2行。
+            const auto text=makeTextGeometry(QString::fromUtf8("照明\n音響"),12,{-30,30},TextHorizontalAlignment::Right,TextVerticalAlignment::FirstBaseline); // 固定フォントの日本語2行。
             if (!text) { app.exit(8); return; }
-            const auto id=view->document()->addShape(*text); // 復元後も表示倍率を保持する文字UUID。
+            const auto id=view->document()->addShape(*text); // 復元後も現在の縮尺に対する設定ptを保持する文字UUID。
             if (id.isNull()) { app.exit(9); return; }
             view->document()->setLayerScale(view->document()->activeLayerId(),50,true);
             view->document()->removeShapes({id}); view->document()->undo(); view->selectionModel()->selectOnly(id);
             if (scenario == "text-dialog") {
-                auto *dialog=new TextEditDialog(text->text,text->pointSizePt,text->fontFamily,&w); // 親画面とともに破棄する未確定ダイアログ。
-                dialog->show();
+                const auto current=std::get<TextGeometry>(view->document()->shape(id)->geometryMm); // 縮尺変更後の実際の設定サイズ。
+                auto *dialog=new TextEditDialog(current.text,current.pointSizePt,current.fontFamily,&w); // 親画面とともに破棄する未確定ダイアログ。
+                dialog->setAlignment(text->horizontalAlignment,text->verticalAlignment); dialog->show();
             }
         }
         if (!w.close()) app.exit(6);

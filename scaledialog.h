@@ -36,7 +36,7 @@ private:
     void validateInput();
     // m_presets: 定型縮尺と任意入力を選ぶコンボボックス。縮尺ダイアログが所有する。
     QComboBox *m_presets;
-    // m_scaleText: 文字の設定ptを保ったまま表示を伸縮する、ダイアログ所有のチェック。
+    // m_scaleText: 文字の設定ptを縮尺比で変更する、ダイアログ所有のチェック。
     QCheckBox *m_scaleText;
     // m_custom: 任意縮尺の分母を入力する欄。縮尺ダイアログが所有する。
     QLineEdit *m_custom;

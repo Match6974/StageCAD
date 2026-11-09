@@ -12,6 +12,7 @@
 #include <QPointer>
 #include "pdfplacement.h"
 
+class TextAlignmentEditor;
 class DrawingSettings;
 class DrawingView;
 class QLabel;
@@ -143,12 +144,14 @@ private:
     QPushButton *m_addPointButton;
     /// @brief 文字の作成または編集を下書きダイアログで行う。取消では履歴を変更しない。
     /// @param id 編集時の既存文字UUID。空UUIDは新規作成。
-    /// @param anchorMm 作成時の左上位置（実寸mm）。
+    /// @param anchorMm 作成時のAlignment Point（実寸mm）。
     void editText(const QUuid &id = {},QPointF anchorMm = {});
     // m_textPointSize: 次に作成する文字サイズ（pt）。縮尺を変更しても維持する。
     double m_textPointSize = 12;
     // m_textOptions: 固定フォントとサイズ設定を置く、ツールバー所有の表示バー。
     QWidget *m_textOptions;
+    // m_textAlignment: 次に作成する文字の揃えを指定する、表示バー所有の入力。
+    TextAlignmentEditor *m_textAlignment;
     // m_textSizeInput: 現在の単位でサイズを入力する、表示バー所有の入力欄。
     QDoubleSpinBox *m_textSizeInput;
     // m_textUnit: 表示単位ごとのpt換算を保持する、表示バー所有のコンボ。

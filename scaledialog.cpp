@@ -65,7 +65,7 @@ ScaleDialog::ScaleDialog(const DrawingSettings *settings, QWidget *parent)
     layout->addLayout(form);
     m_scaleText = new QCheckBox(tr("スケールテキスト"),this);
     m_scaleText->setObjectName("scaleTextCheckBox");
-    m_scaleText->setToolTip(tr("ON: 文字の見た目も縮尺に比例して伸縮します。OFF: 用紙上の大きさを保ちます。フォントサイズの設定値は変更しません。"));
+    m_scaleText->setToolTip(tr("ON: 文字のフォントサイズを縮尺比に合わせて変更します。OFF: フォントサイズを維持します。文字の拡縮は各文字の基準点を固定して行います。"));
     layout->addWidget(m_scaleText);
 
     // preset: 現在の縮尺に対応する候補のインデックス。任意入力は末尾。

@@ -46,6 +46,7 @@ bool sameShape(const ShapeData &a,const ShapeData &b)
     if (const auto *text = std::get_if<TextGeometry>(&a.geometryMm)) {
         const auto &other = std::get<TextGeometry>(b.geometryMm); // 比較相手の設定値と字形。
         return text->text == other.text && text->fontFamily == other.fontFamily
+            && text->horizontalAlignment == other.horizontalAlignment && text->verticalAlignment == other.verticalAlignment
             && text->pointSizePt == other.pointSizePt && text->unitPath == other.unitPath && text->unitBounds == other.unitBounds
             && samePoint(text->anchorMm+a.positionMm,other.anchorMm+b.positionMm);
     }
@@ -67,7 +68,7 @@ public:
     /// @param next 検証済みの変更後リスト。
     /// @param text 操作の表示名。
     DocumentEditCommand(DrawingDocument *document,const QList<ShapeData> &next,const QString &text)
-        : QUndoCommand(text),m_document(document) {
+        : QUndoCommand(text),m_document(document),m_textScaleFactorsAtCapture(document->m_textScaleFactors) {
         // afterById: 変更後のUUID検索表。全図形を変更する移動でも二重走査を避ける。
         QHash<QUuid,const ShapeData*> afterById;
         // data: 検証済み候補リスト内で生存する各図形への参照。
@@ -103,6 +104,17 @@ private:
         // index: 追加・削除する図形の元の描画位置。
         qsizetype index;
     };
+    /// @brief 履歴確定後に行った縮尺変更を、復元する文字の設定ptにも反映する。
+    /// @param snapshot コマンドが保持する確定時の値。元のスナップショットは書き換えない。
+    ShapeData restoredShape(const ShapeData &snapshot) const {
+        ShapeData restored=snapshot; // 現在の縮尺操作だけを重ねた復元候補。
+        if (auto *text=std::get_if<TextGeometry>(&restored.geometryMm)) {
+            const double current=m_document->m_textScaleFactors.value(snapshot.layerId,1); // 現在の累積サイズ換算。
+            const double captured=m_textScaleFactorsAtCapture.value(snapshot.layerId,1); // コマンド確定時の累積換算。
+            text->pointSizePt *= current/captured;
+        }
+        return restored;
+    }
     /// @brief 全差分を反映してから通知し、受信側へ中間状態を見せない。
     /// @param forward 変更後へ進むならtrue、変更前へ戻すならfalse。
     void apply(bool forward) {
@@ -126,7 +138,7 @@ private:
             else {
                 // value: この復元方向で存在する図形の値。
                 const auto &value = forward ? change->after : change->before;
-                if (value) remaining.append(*value);
+                if (value) remaining.append(restoredShape(*value));
             }
         }
         // a/b: 元の描画位置で昇順に比較する追加差分。
@@ -139,7 +151,7 @@ private:
         for (qsizetype index=0; index<remaining.size()+inserts.size(); ++index) {
             if (insertion<inserts.size() && inserts[insertion]->index == index) {
                 // change: 元の位置へ復元する図形の差分。
-                const auto *change = inserts[insertion++]; next.append(*(forward ? change->after : change->before));
+                const auto *change = inserts[insertion++]; next.append(restoredShape(*(forward ? change->after : change->before)));
             } else next.append(remaining[existing++]);
         }
         emit m_document->aboutToChange(); m_document->m_shapes = next;
@@ -156,6 +168,8 @@ private:
     DrawingDocument *m_document;
     // m_changes: 変更図形だけの前後値と描画位置。
     QList<Change> m_changes;
+    // m_textScaleFactorsAtCapture: 履歴確定時のレイヤー別累積サイズ換算。縮尺操作自体は履歴に追加しない。
+    QHash<QUuid,double> m_textScaleFactorsAtCapture;
 };
 
 /// @brief レイヤーの追加・名前変更を共通の文書履歴へ記録する。履歴スタックが所有する。
@@ -303,43 +317,49 @@ bool DrawingDocument::setLayerVisibility(const QUuid &id,LayerVisibility visibil
 /// @brief 他のレイヤーや図形寸法を変えずに縮尺を確定する。表示操作なのでRedoを保持する。
 /// @param id 変更対象レイヤーのUUID。
 /// @param denominator 新しい縮尺1:Nの分母。
-/// @param scaleText 文字の見た目を縮尺比で伸縮するか。設定ptは維持する。
+/// @param scaleText trueなら文字の設定pt自体を旧分母／新分母の比で変更する。
 bool DrawingDocument::setLayerScale(const QUuid &id,double denominator,bool scaleText) {
     // target: 存在・変更前の縮尺を確認する値コピー。
     const auto target = layer(id);
     if (m_mutating || !target || !DrawingSettings::isValidScale(denominator)) return false;
     if (target->scaleDenominator == denominator) return true;
-    auto nextVisual = m_textVisualScales; // 全件検証後に一括反映する、表示倍率の候補。
-    for (const auto &shape : m_shapes) { // 対象レイヤーの文字だけに適用する。
+    const double ratio=scaleText ? target->scaleDenominator/denominator : 1; // 用紙上のサイズを縮尺比で換算する倍率。
+    const double cumulative=m_textScaleFactors.value(id,1)*ratio; // Undo／Redoで維持する累積の設定pt換算。
+    if (!std::isfinite(cumulative) || cumulative<=0) return false;
+    auto next=m_shapes; // 全文字を検証してから縮尺と同時に反映する候補。
+    QList<QUuid> changed; // フォントサイズが変わった文字だけを通知するUUID一覧。
+    for (auto &shape : next) { // 通常・非表示・グレイを問わず対象レイヤーの文字に適用する。
         if (shape.layerId != id || shape.kind() != ShapeKind::Text) continue;
-        const double visual = nextVisual.value(shape.id,1) * (scaleText ? target->scaleDenominator/denominator : 1); // 設定ptと独立した倍率。
-        if (!shape.isValid(denominator*visual)) return false;
-        nextVisual.insert(shape.id,visual);
+        auto &text=std::get<TextGeometry>(shape.geometryMm); // 縮尺変更でも字形の1emキャッシュは再生成しない。
+        text.pointSizePt *= ratio;
+        if (!shape.isValid(denominator)) return false;
+        if (scaleText) changed.append(shape.id);
     }
-    // guard: 変更中の描画・履歴操作の割り込みを防ぐガード。
+    // guard: 縮尺・文字を確定してから通知し、再入や中間状態の参照を防ぐ。
     QScopedValueRollback<bool> guard(m_mutating,true); emit aboutToChange();
-    m_textVisualScales = nextVisual;
-    // data: 対象の換算倍率だけを更新するレイヤー。
-    for (auto &data : m_layers) if (data.id == target->id) data.scaleDenominator = denominator;
-    emit layersChanged(); return true;
+    m_shapes=next; m_textScaleFactors.insert(id,cumulative);
+    for (auto &data : m_layers) if (data.id == id) data.scaleDenominator=denominator; // 対象レイヤーの縮尺だけを更新する。
+    emit layersChanged();
+    for (const auto &changedId : changed) emit shapeChanged(changedId); // 情報パレットにも新しいpt値を反映する。
+    return true;
 }
-/// @brief レイヤー換算と文字の見た目だけの倍率から描画パスを得る。
+/// @brief 実際の設定ptとレイヤー縮尺から描画パスを得る。
 /// @param data 文書内の図形。
 QPainterPath DrawingDocument::shapePath(const ShapeData &data) const {
     const auto owner=layer(data.layerId); // 紙面mmから実寸への換算元。
-    return data.localPath((owner ? owner->scaleDenominator : 1)*m_textVisualScales.value(data.id,1));
+    return data.localPath(owner ? owner->scaleDenominator : 1);
 }
 /// @brief 文字の空白を含む行ボックスも実寸で返す。
 /// @param data 文書内の図形。
 QRectF DrawingDocument::shapeBounds(const ShapeData &data) const {
     const auto owner=layer(data.layerId); // 紙面mmから実寸への換算元。
-    return data.boundsMm((owner ? owner->scaleDenominator : 1)*m_textVisualScales.value(data.id,1));
+    return data.boundsMm(owner ? owner->scaleDenominator : 1);
 }
 /// @brief 表示倍率込みの範囲を検証する。モデル検証でフォントAPIは使用しない。
 /// @param data 確定候補。
 bool DrawingDocument::validShape(const ShapeData &data) const {
     const auto owner=layer(data.layerId); // 対象の所属先。
-    return owner && data.isValid(owner->scaleDenominator*m_textVisualScales.value(data.id,1));
+    return owner && data.isValid(owner->scaleDenominator);
 }
 /// @brief 縮尺が一致する場合だけ手動の表示状態を使い、不一致の場合は一時的に隠す。
 /// @param id 表示状態を調べるレイヤーUUID。

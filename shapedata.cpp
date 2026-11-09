@@ -7,6 +7,14 @@
 #include <cmath>
 #include <limits>
 
+/// @brief 文字固有の水平3種類・垂直4種類だけを受け付ける。
+/// @param horizontal 左・中央・右の水平揃え。
+/// @param vertical 上・先頭行ベースライン・中央・下の垂直基準。
+bool validTextAlignment(TextHorizontalAlignment horizontal,TextVerticalAlignment vertical) {
+    return horizontal >= TextHorizontalAlignment::Left && horizontal <= TextHorizontalAlignment::Right
+        && vertical >= TextVerticalAlignment::Top && vertical <= TextVerticalAlignment::Bottom;
+}
+
 /// @brief 形状データの型から図形の種類を返す。
 ShapeKind ShapeData::kind() const
 {
@@ -74,7 +82,7 @@ QPainterPath ShapeData::localPath(double textModelScale) const
     if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) {
         // emMm: 設定ptを表示上の実寸mmへ換算した1em。
         const double emMm = text->pointSizePt * (25.4 / 72.0) * textModelScale;
-        QTransform transform; // 左上アンカーへの配置と字形の拡大だけを行う。
+        QTransform transform; // Alignment Pointを固定した配置と字形の拡大だけを行う。
         transform.translate(text->anchorMm.x(),text->anchorMm.y()); transform.scale(emMm,emMm);
         path = transform.map(text->unitPath);
     }
@@ -147,7 +155,8 @@ bool ShapeData::isValid(double textModelScale) const
         const QPointF extent(circle->radiusMm, circle->radiusMm);
         if (!validPoint(circle->centerMm - extent) || !validPoint(circle->centerMm + extent)) return false;
     } else if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) {
-        if (text->text.trimmed().isEmpty() || text->fontFamily.isEmpty()
+        if (!validTextAlignment(text->horizontalAlignment,text->verticalAlignment)
+            || text->text.trimmed().isEmpty() || text->fontFamily.isEmpty()
             || !std::isfinite(text->pointSizePt) || text->pointSizePt <= 0
             || !std::isfinite(textModelScale) || textModelScale <= 0 || !validPoint(text->anchorMm)
             || text->unitPath.isEmpty() || !text->unitBounds.isValid()) return false;

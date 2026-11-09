@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QUuid>
 
+class TextAlignmentEditor;
 class DrawingDocument;
 class ShapeSelectionModel;
 class QLabel;
@@ -35,7 +36,7 @@ signals:
     /// @brief 単独選択文字の内容とサイズを編集するダイアログを要求する。
     /// @param id 編集対象の文字UUID。
     void textEditRequested(const QUuid &id);
-    /// @brief 選択頂点を図面上に表示する。非多角形や未選択ではvisible=false。
+    /// @brief 選択頂点または文字のAlignment Pointを図面上に表示する。他の種類や未選択ではvisible=false。
     /// @param point 用紙中心基準の実寸座標（mm）。
     /// @param visible 頂点マーカーを表示するかどうか。
     void vertexHighlighted(QPointF point, bool visible);
@@ -94,6 +95,8 @@ private:
     QGroupBox *m_shapeGroup;
     // m_textEditButton: 選択文字の内容・サイズを編集する、形状グループ所有のボタン。
     QPushButton *m_textEditButton;
+    // m_textAlignment: 単独選択文字の揃えとAlignment Pointを編集する、形状グループ所有の入力。
+    TextAlignmentEditor *m_textAlignment;
     // m_form: 項目名と値を並べる、形状グループ所有のレイアウト。
     QFormLayout *m_form;
     // m_values: 項目名から値ラベルへの参照表。各ラベルは形状グループが所有する。

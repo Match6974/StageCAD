@@ -3,7 +3,9 @@
  * @brief 文字とサイズの下書きを検証し、単位切替で値の精度を保つ。
  */
 #include "texteditdialog.h"
+#include "textalignmenteditor.h"
 #include <QPlainTextEdit>
+#include <QEvent>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QPushButton>
@@ -50,8 +52,11 @@ TextEditDialog::TextEditDialog(const QString &text,double pointSize,const QStrin
     // value: CSVに記載された文字サイズの定型値（pt）。
     for (const int value : {4,6,7,8,9,10,11,12,14,18,20,24,28,36,48,72,96,144}) presets->addItem(tr("%1 pt").arg(value),value);
     sizeLayout->addWidget(presets); form->addRow(tr("文字サイズ"),sizeRow);
+    m_alignment=new TextAlignmentEditor(this); m_alignment->setObjectName("textDialogAlignment");
+    form->addRow(tr("基準点（Alignment Point）"),m_alignment);
     m_text = new QPlainTextEdit(this); m_text->setObjectName("textContentInput"); m_text->setPlainText(text);
-    m_text->setPlaceholderText(tr("文字を入力してください（改行できます）")); layout->addWidget(m_text);
+    m_text->setPlaceholderText(tr("文字を入力してください（改行できます）"));
+    m_text->installEventFilter(this); layout->addWidget(m_text);
     m_error = new QLabel(this); m_error->setObjectName("textInputError"); m_error->setWordWrap(true); layout->addWidget(m_error);
     // buttons: OKは下書き確定、取消・Escは下書き破棄として扱う標準ボタン。
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,this);
@@ -78,6 +83,7 @@ TextEditDialog::TextEditDialog(const QString &text,double pointSize,const QStrin
         // locale: 桁区切りのない小数点表記に揃える表示用ロケール。
         QLocale locale; locale.setNumberOptions(QLocale::OmitGroupSeparator);
         m_size->setText(locale.toString(m_canonicalSize/m_unitFactor,'f',6)); validate();
+        emit sizeUnitChanged(m_unit->currentIndex());
     });
     // index: 選択した定型サイズの番号。0は任意指定なので値を変えない。
     // コールバック: 定型ptを現在の単位へ換算して入力する。
@@ -91,6 +97,31 @@ TextEditDialog::TextEditDialog(const QString &text,double pointSize,const QStrin
         m_size->setText(locale.toString(m_canonicalSize/m_unitFactor,'f',6)); validate();
     });
     validate(); m_text->setFocus();
+}
+/// @brief フォーカス中は、IME変換確定前でも案内文を表示しない。
+/// @param watched フォーカスを監視する文字入力欄。
+/// @param event Qt所有のフォーカス等のイベント。
+bool TextEditDialog::eventFilter(QObject *watched,QEvent *event) {
+    if (watched == m_text) {
+        if (event->type() == QEvent::FocusIn) m_text->setPlaceholderText({});
+        else if (event->type() == QEvent::FocusOut) m_text->setPlaceholderText(tr("文字を入力してください（改行できます）"));
+    }
+    return QDialog::eventFilter(watched,event);
+}
+/// @brief 下書きの水平揃えを返す。
+TextHorizontalAlignment TextEditDialog::horizontalAlignment() const { return m_alignment->horizontalAlignment(); }
+/// @brief 下書きの垂直基準を返す。
+TextVerticalAlignment TextEditDialog::verticalAlignment() const { return m_alignment->verticalAlignment(); }
+/// @brief ダイアログを開く時点の文字属性を、モデルへ書かず表示する。
+/// @param horizontal 水平揃え。
+/// @param vertical 垂直基準。
+void TextEditDialog::setAlignment(TextHorizontalAlignment horizontal,TextVerticalAlignment vertical) { m_alignment->setAlignment(horizontal,vertical); }
+/// @brief 現在選択している共有表示単位の番号を返す。
+int TextEditDialog::sizeUnitIndex() const { return m_unit->currentIndex(); }
+/// @brief 正規の単位番号だけを適用し、設定ptを再計算せず表示を換算する。
+/// @param index 0=pt、1=mm、2=インチ。
+void TextEditDialog::setSizeUnitIndex(int index) {
+    if (index >= 0 && index < m_unit->count()) m_unit->setCurrentIndex(index);
 }
 /// @brief HTMLではなく、入力された改行付き文字列を返す。
 QString TextEditDialog::text() const { return m_text->toPlainText(); }

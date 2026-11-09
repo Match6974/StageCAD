@@ -6,6 +6,8 @@
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
 #include "rectangleanchorselector.h"
+#include "textalignmenteditor.h"
+#include "textlayout.h"
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QCheckBox>
@@ -117,6 +119,18 @@ ObjectInfoPanel::ObjectInfoPanel(DrawingDocument *document, ShapeSelectionModel 
         data->polygonClosed = closed;
         if (!m_document->updateShape(*data)) { refresh(); m_error->setText(tr("3点以上の有効な面が必要なため閉じられません。")); }
     });
+    m_textAlignment=new TextAlignmentEditor(m_shapeGroup); m_textAlignment->setObjectName("textObjectAlignment");
+    m_form->addRow(tr("基準点（Alignment Point）"),m_textAlignment);
+    // コールバック: 揃えを変えても基準点の実寸座標を固定し、編集を1回のUndo対象にする。
+    connect(m_textAlignment,&TextAlignmentEditor::alignmentChanged,this,[this] {
+        auto data=m_selection ? m_selection->singleShape() : std::nullopt; // 編集時点で選択中の値コピー。
+        if (!isEnabled() || !m_document || !data || data->id != m_editId || data->kind() != ShapeKind::Text) { refresh(); return; }
+        const auto &text=std::get<TextGeometry>(data->geometryMm); // 現在の設定サイズと固定する実寸点。
+        const auto geometry=makeTextGeometry(text.text,text.pointSizePt,text.anchorMm,
+            m_textAlignment->horizontalAlignment(),m_textAlignment->verticalAlignment()); // 揃えだけを変更した字形候補。
+        if (geometry) data->geometryMm=*geometry;
+        if (!geometry || !m_document->updateShape(*data)) { refresh(); m_error->setText(tr("基準点の変更後に座標範囲を超えるため適用できません。")); }
+    });
     m_textEditButton = new QPushButton(tr("文字・サイズを編集…"),m_shapeGroup);
     m_textEditButton->setObjectName("editSelectedTextButton"); m_form->addRow(m_textEditButton);
     // コールバック: 表示されたUUIDを再確認し、編集対象だけをメイン画面へ渡す。
@@ -219,17 +233,18 @@ void ObjectInfoPanel::refresh()
     // isPolygon: 頂点編集と外接矩形の9点基準を表示する対象。
     const bool isPolygon = single && single->kind() == ShapeKind::Polygon;
     m_form->setRowVisible(m_textEditButton,single && single->kind() == ShapeKind::Text);
+    m_form->setRowVisible(m_textAlignment,single && single->kind() == ShapeKind::Text);
     m_form->setRowVisible(m_anchorSelector,isRectangle || isPolygon);
     m_form->setRowVisible(m_vertexControls,isPolygon);
-    if (!isPolygon) emit vertexHighlighted({},false);
+    if (!isPolygon && (!single || single->kind() != ShapeKind::Text)) emit vertexHighlighted({},false);
     m_anchorLabel->setText(tr("固定点: %1").arg(m_anchorSelector->anchorName()));
-    // axis: 四角形では基準点、それ以外では左下として座標の意味を明示する行名。
+    // axis: 四角形・多角形・文字では基準点、その他では左下として座標の意味を明示する行名。
     for (const QString axis : {QStringLiteral("X"),QStringLiteral("Y")}) {
         // key: 基準点・外接範囲の座標を表示する項目名。
         const QString key = "origin" + axis;
         // label: フォームが生成・所有する、座標の項目名ラベル。
         auto *label = qobject_cast<QLabel*>(m_form->labelForField(m_fieldRows.value(key)));
-        label->setText((isRectangle || isPolygon) ? tr("基準点 %1").arg(axis) : (single && single->kind() == ShapeKind::Text ? tr("左上 %1").arg(axis) : tr("左下 %1").arg(axis)));
+        label->setText((isRectangle || isPolygon) ? tr("基準点 %1").arg(axis) : (single && single->kind() == ShapeKind::Text ? tr("基準点 %1").arg(axis) : tr("左下 %1").arg(axis)));
     }
     m_shapeGroup->setVisible(single.has_value() && !isLine); m_lineGroup->setVisible(isLine);
     if (!single) {
@@ -262,6 +277,8 @@ void ObjectInfoPanel::refresh()
     case ShapeKind::Text: {
         const auto &text=std::get<TextGeometry>(single->geometryMm); // 設定ptと固定フォント。縮尺による見た目と区別する。
         m_summary->setText(tr("文字（横書き）\n%1 / %2 pt\n%3").arg(text.fontFamily).arg(text.pointSizePt,0,'g',15).arg(text.text));
+        m_textAlignment->setAlignment(text.horizontalAlignment,text.verticalAlignment);
+        emit vertexHighlighted(text.anchorMm+offset,true); // 図面上にも現在固定するAlignment Pointを表示する。
         showEditor("originX",text.anchorMm.x()+offset.x()); showEditor("originY",text.anchorMm.y()+offset.y());
         break;
     }
@@ -436,7 +453,7 @@ void ObjectInfoPanel::commitField(const QString &key)
             else if (key == "arcStart") { circle.startAngleDeg = std::fmod(value,360); if (circle.startAngleDeg < 0) circle.startAngleDeg += 360; }
             else if (key == "arcSweep" && value > 0 && value <= 360) circle.sweepAngleDeg = value;
             else { m_error->setText(tr("寸法は正の値、円弧角は0より大きく360°以下で指定してください。")); return; }
-        } else {
+        } else if (next.kind() == ShapeKind::Polygon) {
             // points: 個別頂点または外接範囲の拡縮に使うローカル実寸頂点列。
             auto &points = std::get<QPolygonF>(next.geometryMm);
             if (key == "vertexX" && m_vertexIndex < points.size()) points[m_vertexIndex].setX(value-next.positionMm.x());
@@ -454,6 +471,7 @@ void ObjectInfoPanel::commitField(const QString &key)
                 }
             } else { m_error->setText(tr("寸法は0より大きい値が必要です。")); return; }
         }
+        else { m_error->setText(tr("この文字項目は編集できません。")); return; }
         // 配置をローカル座標へ統合し、移動済み図形でも有効な実寸範囲全体を編集できるようにする。
         if (auto *rect = std::get_if<QRectF>(&next.geometryMm)) *rect = rect->translated(next.positionMm);
         else if (auto *circle = std::get_if<CircleGeometry>(&next.geometryMm)) circle->centerMm += next.positionMm;

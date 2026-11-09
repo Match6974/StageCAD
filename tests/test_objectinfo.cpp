@@ -18,6 +18,7 @@
 #include <QLocale>
 #include <QSignalSpy>
 #include <QTest>
+#include <QInputMethodEvent>
 #include <cmath>
 
 namespace {
@@ -60,6 +61,30 @@ class ObjectInfoTests : public QObject {
 private slots:
     /// @brief 表示文字列の比較に使う小数点形式を統一する。
     void init() { QLocale::setDefault(QLocale::c()); }
+    /// @brief 単位変更の通知とpt値の不変、フォーカス中の案内文非表示を検証する。
+    void textUnitPreferenceAndInputHint() {
+        TextEditDialog dialog({},24,QStringLiteral("Sans Serif")); // 空文字から入力する下書き。
+        auto *text=dialog.findChild<QPlainTextEdit*>("textContentInput"); // IME入力の対象。
+        auto *size=dialog.findChild<QLineEdit*>("textSizeInput"); // フォーカスを移す別の入力欄。
+        auto *unit=dialog.findChild<QComboBox*>("textSizeUnit"); // ダイアログ所有の共有単位選択。
+        QSignalSpy changes(&dialog,&TextEditDialog::sizeUnitChanged); // 単位変更は確定・取消と独立して通知する。
+        dialog.setSizeUnitIndex(1); QCOMPARE(dialog.sizeUnitIndex(),1); QCOMPARE(changes.count(),1);
+        dialog.setSizeUnitIndex(2); QCOMPARE(changes.count(),2);
+        text->setPlainText(QString::fromUtf8("照明")); QCOMPARE(dialog.pointSize(),24.0);
+        dialog.setSizeUnitIndex(-1); dialog.setSizeUnitIndex(3); QCOMPARE(dialog.sizeUnitIndex(),2); QCOMPARE(changes.count(),2);
+        dialog.setSizeUnitIndex(2); QCOMPARE(changes.count(),2);
+        unit->setCurrentIndex(0); QCOMPARE(dialog.pointSize(),24.0); QCOMPARE(changes.count(),3);
+        text->clear(); dialog.show(); text->setFocus(); QTRY_VERIFY(text->hasFocus());
+        QVERIFY(text->placeholderText().isEmpty());
+        QInputMethodEvent composition(QString::fromUtf8("へんかん"),{}); // 未確定の日本語IME文字列。
+        QApplication::sendEvent(text,&composition);
+        QVERIFY(text->toPlainText().isEmpty()); QVERIFY(text->placeholderText().isEmpty());
+        QInputMethodEvent clearComposition; QApplication::sendEvent(text,&clearComposition); // 変換を取消して空欄に戻す。
+        size->setFocus(); QTRY_VERIFY(!text->hasFocus()); QVERIFY(!text->placeholderText().isEmpty());
+        text->setFocus(); QTRY_VERIFY(text->hasFocus()); QVERIFY(text->placeholderText().isEmpty());
+        text->setPlainText(QString::fromUtf8("確定済み")); size->setFocus(); QCOMPARE(text->toPlainText(),QString::fromUtf8("確定済み"));
+        dialog.reject(); QCOMPARE(dialog.sizeUnitIndex(),0);
+    }
     /// @brief 日本語・改行・文字サイズの任意値・単位切替・取消を文書適用前に検証する。
     void textDraftDialog() {
         // dialog: 確定前の文字とサイズだけを保持する入力画面。

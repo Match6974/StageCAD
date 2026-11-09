@@ -12,6 +12,8 @@ qt_standard_project_setup()
 
 # アプリ本体とGUI回帰テストで共用する、手書きの実装・宣言ファイル。
 set(STAGECAD_SOURCES
+    textalignmenteditor.h
+    textalignmenteditor.cpp
     textlayout.h
     textlayout.cpp
     texteditdialog.h
@@ -140,7 +142,7 @@ if(BUILD_TESTING)
     set_tests_properties(stagecad_selection_tests PROPERTIES TIMEOUT 30)
 
     # 情報表示はPDFに依存せず、図形と選択モデルの読み取りだけで検証する。
-    qt_add_executable(stagecad_objectinfo_tests tests/test_objectinfo.cpp texteditdialog.cpp texteditdialog.h textlayout.cpp textlayout.h
+    qt_add_executable(stagecad_objectinfo_tests tests/test_objectinfo.cpp textalignmenteditor.cpp textalignmenteditor.h texteditdialog.cpp texteditdialog.h textlayout.cpp textlayout.h
         objectinfopanel.cpp objectinfopanel.h rectangleanchorselector.cpp rectangleanchorselector.h
         shapeselectionmodel.cpp shapeselectionmodel.h
         shapedata.cpp shapedata.h drawingdocument.cpp drawingdocument.h)

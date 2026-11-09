@@ -86,15 +86,15 @@ public:
     /// @param id 対象レイヤーUUID。
     /// @param visibility 通常・非表示・グレイのいずれか。
     bool setLayerVisibility(const QUuid &id,LayerVisibility visibility);
-    /// @brief 対象レイヤーの縮尺と文字の見た目を変更する。図形寸法・設定pt・履歴は維持する。
+    /// @brief 対象レイヤーの縮尺を変更する。ONでは文字の設定ptを変更し、図形寸法と履歴の可否を維持する。
     /// @param id 対象レイヤーUUID。
     /// @param denominator 縮尺1:Nの分母。表示設定と共通の有限な許容範囲に限る。
-    /// @param scaleText trueなら紙面上の文字も縮尺比で伸縮する。設定ptは維持する。
+    /// @param scaleText trueなら文字の設定ptを旧分母／新分母の比で変更する。OFFは設定ptを維持する。
     bool setLayerScale(const QUuid &id,double denominator,bool scaleText = false);
-    /// @brief レイヤー縮尺と文字の表示補正を含むローカル描画パスを返す。
+    /// @brief レイヤー縮尺と実際の文字サイズを含むローカル描画パスを返す。
     /// @param data 文書内の図形データ。
     QPainterPath shapePath(const ShapeData &data) const;
-    /// @brief 文字の表示補正と配置を含む実寸mmの外接範囲を返す。
+    /// @brief 文字の設定pt・レイヤー縮尺と配置を含む実寸mmの外接範囲を返す。
     /// @param data 文書内の図形データ。
     QRectF shapeBounds(const ShapeData &data) const;
     /// @brief レイヤーの表示換算を含めて実寸座標範囲を検証する。
@@ -155,8 +155,8 @@ private:
     QUndoStack *m_history;
 
     // m_shapes: モデルが値として所有する確定図形。描画・重なり順を保持する。
-    // m_textVisualScales: 設定ptと独立した表示倍率。Undoで属性を戻しても縮尺設定は維持する。
-    QHash<QUuid,double> m_textVisualScales;
+    // m_textScaleFactors: 履歴外の縮尺操作で変えた設定ptの累積倍率。描画は実際のpt値だけを使う。
+    QHash<QUuid,double> m_textScaleFactors;
     QList<ShapeData> m_shapes; // In drawing/stacking order.
     // m_mutating: モデルの変更通知中に入れ子の変更を受け付けないための再入防止フラグ。
     bool m_mutating = false;

@@ -26,7 +26,7 @@ class DrawingView : public QGraphicsView
 {
     Q_OBJECT
 public:
-    /// @brief 情報パレットで選択した多角形の頂点を画面上に示す。
+    /// @brief 情報パレットで選択した多角形の頂点または文字の基準点を画面上に示す。
     /// @param point 用紙中心基準の実寸座標（mm）。
     /// @param visible マーカーを表示するかどうか。
     void highlightVertex(QPointF point, bool visible);
@@ -102,8 +102,8 @@ public:
     void setContentBounds(QRectF bounds);
 
 signals:
-    /// @brief 文字の左上配置点を指定したことを通知する。入力・確定はメイン画面が行う。
-    /// @param anchorMm 左上の実寸座標（mm）。
+    /// @brief 文字のAlignment Pointを指定したことを通知する。入力・確定はメイン画面が行う。
+    /// @param anchorMm 選択した基準点の実寸座標（mm）。
     void textCreationRequested(QPointF anchorMm);
     /// @brief 選択モードでダブルクリックした文字の編集を要求する。
     /// @param id 編集する文字UUID。
@@ -174,7 +174,7 @@ protected:
     void drawForeground(QPainter *painter, const QRectF &rect) override;
 
 private:
-    // m_vertexMarker: 選択頂点を示すシーン所有のマーカー。画面サイズを固定する。
+    // m_vertexMarker: 選択頂点・文字の基準点を示すシーン所有のマーカー。画面サイズを固定する。
     QGraphicsEllipseItem *m_vertexMarker = nullptr;
     /// @brief 縮尺に応じて用紙範囲と表示変換を更新する。確定図形の実寸は維持する。
     void updatePaper();
