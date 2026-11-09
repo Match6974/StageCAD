@@ -10,6 +10,7 @@
 
 class DrawingSettings;
 class QComboBox;
+class QCheckBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
@@ -26,12 +27,17 @@ public:
     explicit ScaleDialog(const DrawingSettings *settings, QWidget *parent = nullptr);
     /// @brief ダイアログの下書き値を縮尺分母として読み取る。変換失敗時は0を返す。
     double scaleDenominator() const;
+    /// @brief 縮尺比に合わせて文字の見た目も伸縮するかを返す。初期値はOFF。
+    bool scaleText() const;
+
 
 private:
     /// @brief 入力の有効性を確認し、確定ボタンとエラー表示を更新する。
     void validateInput();
     // m_presets: 定型縮尺と任意入力を選ぶコンボボックス。縮尺ダイアログが所有する。
     QComboBox *m_presets;
+    // m_scaleText: 文字の設定ptを保ったまま表示を伸縮する、ダイアログ所有のチェック。
+    QCheckBox *m_scaleText;
     // m_custom: 任意縮尺の分母を入力する欄。縮尺ダイアログが所有する。
     QLineEdit *m_custom;
     // m_error: 入力または適用エラーを表示するラベル。所属ダイアログが所有する。

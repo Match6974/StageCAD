@@ -4,6 +4,8 @@
  */
 
 #include "mainwindow.h"
+#include "textlayout.h"
+#include "texteditdialog.h"
 #include "drawingview.h"
 #include "drawingdocument.h"
 #include <QTreeWidget>
@@ -196,6 +198,20 @@ int main(int argc, char **argv)
             const auto second = view->document()->addLayer(); view->document()->setLayerScale(second,50);
             view->document()->addShape(CircleGeometry{{0,0},10});
             view->document()->setActiveLayer(first);
+        }
+        if (scenario == "text-selected" || scenario == "text-dialog") {
+            w.findChild<QTabWidget*>("workspaceTabs")->setCurrentIndex(0);
+            auto *view=w.findChild<DrawingView*>(); // 文字の表示・選択・履歴を所有するビュー。
+            const auto text=makeTextGeometry(QString::fromUtf8("照明\n音響"),12,{-30,30}); // 固定フォントの日本語2行。
+            if (!text) { app.exit(8); return; }
+            const auto id=view->document()->addShape(*text); // 復元後も表示倍率を保持する文字UUID。
+            if (id.isNull()) { app.exit(9); return; }
+            view->document()->setLayerScale(view->document()->activeLayerId(),50,true);
+            view->document()->removeShapes({id}); view->document()->undo(); view->selectionModel()->selectOnly(id);
+            if (scenario == "text-dialog") {
+                auto *dialog=new TextEditDialog(text->text,text->pointSizePt,text->fontFamily,&w); // 親画面とともに破棄する未確定ダイアログ。
+                dialog->show();
+            }
         }
         if (!w.close()) app.exit(6);
     });

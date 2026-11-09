@@ -13,6 +13,7 @@ ShapeKind ShapeData::kind() const
     if (std::holds_alternative<QLineF>(geometryMm)) return ShapeKind::Line;
     if (std::holds_alternative<QRectF>(geometryMm)) return ShapeKind::Rectangle;
     if (std::holds_alternative<CircleGeometry>(geometryMm)) return ShapeKind::Circle;
+    if (std::holds_alternative<TextGeometry>(geometryMm)) return ShapeKind::Text;
     return ShapeKind::Polygon;
 }
 
@@ -33,6 +34,7 @@ QPointF ShapeData::referencePoint(QPointF fraction) const
 {
     if (const auto *rect = std::get_if<QRectF>(&geometryMm))
         return rectangleTransform().map(rect->topLeft()+QPointF(rect->width()*fraction.x(),rect->height()*fraction.y()))+positionMm;
+    if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) return text->anchorMm + positionMm;
     // bounds: 多角形の配置済み外接範囲（実寸mm）。
     const QRectF bounds = boundsMm();
     return bounds.topLeft()+QPointF(bounds.width()*fraction.x(),bounds.height()*fraction.y());
@@ -46,7 +48,7 @@ bool ShapeData::isFilled() const
 }
 
 /// @brief 配置移動量を加える前の形状を、描画・選択判定用のパスへ変換する。
-QPainterPath ShapeData::localPath() const
+QPainterPath ShapeData::localPath(double textModelScale) const
 {
     // path: 配置移動量を加える前の形状パス（実寸mm）。
     QPainterPath path;
@@ -69,11 +71,26 @@ QPainterPath ShapeData::localPath() const
     else if (const auto *polygon = std::get_if<QPolygonF>(&geometryMm)) {
         path.addPolygon(*polygon); if (polygonClosed) path.closeSubpath();
     }
+    if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) {
+        // emMm: 設定ptを表示上の実寸mmへ換算した1em。
+        const double emMm = text->pointSizePt * (25.4 / 72.0) * textModelScale;
+        QTransform transform; // 左上アンカーへの配置と字形の拡大だけを行う。
+        transform.translate(text->anchorMm.x(),text->anchorMm.y()); transform.scale(emMm,emMm);
+        path = transform.map(text->unitPath);
+    }
     return path;
 }
 
 /// @brief 配置移動量を含めた実寸mmの外接矩形を返す。
-QRectF ShapeData::boundsMm() const { return localPath().boundingRect().translated(positionMm); }
+QRectF ShapeData::boundsMm(double textModelScale) const {
+    if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) {
+        const double emMm = text->pointSizePt * (25.4 / 72.0) * textModelScale; // 表示上の1em（実寸mm）。
+        QTransform transform; // 空白を含む行ボックスを実寸へ変換する。
+        transform.translate(text->anchorMm.x(),text->anchorMm.y()); transform.scale(emMm,emMm);
+        return transform.mapRect(text->unitBounds).translated(positionMm);
+    }
+    return localPath().boundingRect().translated(positionMm);
+}
 
 /// @brief 座標の各成分が有限で、実寸mmの許容範囲内にあるかを返す。
 /// @param point 用紙中心基準の実寸座標（mm）。
@@ -110,7 +127,7 @@ bool ShapeData::validPolygon(const QPolygonF &points)
 }
 
 /// @brief ID・形状・配置が有効かを確認する。大きさ0や範囲外の形状は拒否する。
-bool ShapeData::isValid() const
+bool ShapeData::isValid(double textModelScale) const
 {
     if (!std::isfinite(rectangleAngleDeg) || (kind() != ShapeKind::Rectangle && rectangleAngleDeg != 0)) return false;
     if (id.isNull() || !std::isfinite(positionMm.x()) || !std::isfinite(positionMm.y())) return false;
@@ -129,6 +146,17 @@ bool ShapeData::isValid() const
         // extent: 円の外接矩形を得るための半径ベクトル（実寸mm）。
         const QPointF extent(circle->radiusMm, circle->radiusMm);
         if (!validPoint(circle->centerMm - extent) || !validPoint(circle->centerMm + extent)) return false;
+    } else if (const auto *text = std::get_if<TextGeometry>(&geometryMm)) {
+        if (text->text.trimmed().isEmpty() || text->fontFamily.isEmpty()
+            || !std::isfinite(text->pointSizePt) || text->pointSizePt <= 0
+            || !std::isfinite(textModelScale) || textModelScale <= 0 || !validPoint(text->anchorMm)
+            || text->unitPath.isEmpty() || !text->unitBounds.isValid()) return false;
+        // index: キャッシュ字形内の座標も有限であることを確認する走査番号。
+        for (int index=0; index<text->unitPath.elementCount(); ++index) {
+            const auto element = text->unitPath.elementAt(index); // 1em字形のパス要素。
+            if (!std::isfinite(element.x) || !std::isfinite(element.y)) return false;
+        }
+        if (!text->unitBounds.contains(text->unitPath.boundingRect())) return false;
     } else {
         // points: 開閉に応じて検証する頂点列。開いた形状は2点の線分まで許可する。
         const auto &points = std::get<QPolygonF>(geometryMm);
@@ -141,6 +169,6 @@ bool ShapeData::isValid() const
         }
     }
     // bounds: 検証・描画・測定対象の外接矩形（特記がなければ実寸mm）。
-    const QRectF bounds = boundsMm();
+    const QRectF bounds = boundsMm(textModelScale);
     return validPoint(bounds.topLeft()) && validPoint(bounds.bottomRight());
 }

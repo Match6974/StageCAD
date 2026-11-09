@@ -12,6 +12,10 @@
 #include "objectinfopanel.h"
 #include "navigationpanel.h"
 #include "scaledialog.h"
+#include "texteditdialog.h"
+#include "textlayout.h"
+#include <QComboBox>
+#include <limits>
 #include "pdfcalibrationdialog.h"
 #include "pdfpageitem.h"
 #include "toolpalette.h"
@@ -227,6 +231,41 @@ MainWindow::MainWindow(QWidget *parent)
     m_finishPolygonButton = new QPushButton(tr("多角形を完了"), m_pointInputPanel);
     m_finishPolygonButton->setObjectName("finishPolygonButton"); pointLayout->addWidget(m_finishPolygonButton);
     m_toolOptionsToolbar->addWidget(m_pointInputPanel);
+    m_textOptions = new QWidget(m_toolOptionsToolbar);
+    m_textOptions->setObjectName("textOptionsPanel");
+    auto *textLayout = new QHBoxLayout(m_textOptions); // 表示バー内の固定フォント・任意サイズ・単位・候補。
+    textLayout->setContentsMargins(8,0,0,0);
+    textLayout->addWidget(new QLabel(tr("フォント: %1（固定）").arg(fixedTextFontFamily()),m_textOptions));
+    m_textSizeInput = new QDoubleSpinBox(m_textOptions);
+    m_textSizeInput->setObjectName("textToolbarSizeInput"); m_textSizeInput->setDecimals(6);
+    m_textSizeInput->setRange(0.000001,ShapeData::CoordinateLimitMm); m_textSizeInput->setValue(m_textPointSize);
+    m_textSizeInput->setKeyboardTracking(false); m_textSizeInput->setMinimumWidth(100);
+    m_textUnit = new QComboBox(m_textOptions); m_textUnit->setObjectName("textToolbarSizeUnit");
+    m_textUnit->addItem(tr("pt"),1.0); m_textUnit->addItem(tr("mm"),72.0/25.4); m_textUnit->addItem(tr("インチ"),72.0);
+    auto *textPresets = new QComboBox(m_textOptions); // ポイントで指定する定型候補。表示単位とは独立。
+    textPresets->setObjectName("textToolbarSizePresets"); textPresets->addItem(tr("定型サイズ"));
+    for (int size : {4,6,7,8,9,10,11,12,14,18,20,24,28,36,48,72,96,144}) textPresets->addItem(tr("%1 pt").arg(size),size); // CSVの候補（pt）。
+    textLayout->addWidget(m_textSizeInput); textLayout->addWidget(m_textUnit); textLayout->addWidget(textPresets);
+    m_toolOptionsToolbar->addWidget(m_textOptions);
+    // コールバック: 次の作成サイズを更新する。既存文字は情報パレットから明示的に編集する。
+    connect(m_textSizeInput,&QDoubleSpinBox::valueChanged,this,[this](double size) {
+        m_textPointSize=size*m_textUnit->currentData().toDouble(); // 選択単位からptへ。
+    });
+    // コールバック: 単位を切り替えても元のpt値は丸め直さない。
+    connect(m_textUnit,&QComboBox::currentIndexChanged,this,[this] {
+        const QSignalBlocker block(m_textSizeInput); // 表示変更を作成サイズの変更として扱わない。
+        m_textSizeInput->setValue(m_textPointSize/m_textUnit->currentData().toDouble());
+    });
+    // コールバック: 選択した候補ptを次の文字入力へ反映する。
+    connect(textPresets,&QComboBox::activated,this,[this,textPresets](int index) {
+        if (index == 0) return;
+        m_textPointSize=textPresets->itemData(index).toDouble();
+        const QSignalBlocker block(m_textSizeInput); // 単位換算表示からの逆変換を防ぐ。
+        m_textSizeInput->setValue(m_textPointSize/m_textUnit->currentData().toDouble());
+    });
+    connect(m_drawingView,&DrawingView::textCreationRequested,this,[this](QPointF anchorMm) { editText({},anchorMm); }); // 指定点（実寸mm）で新規入力する。
+    connect(m_drawingView,&DrawingView::textEditRequested,this,[this](const QUuid &id) { editText(id); }); // ダブルクリックした文字UUID。
+    connect(m_objectInfoPanel,&ObjectInfoPanel::textEditRequested,this,[this](const QUuid &id) { editText(id); }); // パレットから編集する文字UUID。
     // コールバック: 有効なX/Y入力を実寸mmの1点として渡し、成功したら作業領域へフォーカスを戻す。
     connect(m_addPointButton, &QPushButton::clicked, this, [this] {
         if (!m_xPointInput->hasAcceptableInput() || !m_yPointInput->hasAcceptableInput()) return;
@@ -478,6 +517,7 @@ void MainWindow::updateDrawingControls()
     // shapeTool: X/Y数値による点指定を使う描画ツールが選択されているかどうか。
     const bool shapeTool = tool == DrawingTool::Line || tool == DrawingTool::Rectangle
         || tool == DrawingTool::Circle || tool == DrawingTool::Polygon;
+    m_textOptions->setVisible(tool == DrawingTool::Text);
     m_pointInputPanel->setVisible(shapeTool);
     m_pointInputPanel->setEnabled(shapeTool && m_drawingView->document()->canCreateShape() && m_drawingView->drawingEnabled() && !m_drawingView->isPickingDistance());
     m_finishPolygonButton->setVisible(tool == DrawingTool::Polygon);
@@ -502,6 +542,7 @@ void MainWindow::updateSelectionDisplay()
     case ShapeKind::Rectangle: name = tr("四角"); break;
     case ShapeKind::Circle: name = tr("円"); break;
     case ShapeKind::Polygon: name = tr("多角形"); break;
+    case ShapeKind::Text: name = tr("文字"); break;
     }
     m_selectionStatus->setText(tr("選択: %1（1個）").arg(name));
 }
@@ -514,7 +555,36 @@ void MainWindow::editScale()
     const auto target = m_drawingView->document()->activeLayerId();
     ScaleDialog dialog(m_drawingSettings, this);
     dialog.setWindowTitle(tr("縮尺 — %1").arg(m_drawingView->document()->layer(target)->name));
-    if (dialog.exec() == QDialog::Accepted) m_drawingView->document()->setLayerScale(target,dialog.scaleDenominator());
+    if (dialog.exec() == QDialog::Accepted && !m_drawingView->document()->setLayerScale(target,dialog.scaleDenominator(),dialog.scaleText()))
+        QMessageBox::warning(this,tr("縮尺を変更できません"),tr("変更後の文字が座標範囲（±10000000mm）を超えるため、適用しませんでした。"));
+}
+
+/// @brief 文字の下書きを確定した場合だけ文書へ1操作を追加する。
+/// @param id 既存文字UUID。空の場合は新規作成する。
+/// @param anchorMm 新規文字の左上（実寸mm）。
+void MainWindow::editText(const QUuid &id,QPointF anchorMm) {
+    auto *document=m_drawingView->document(); // ビュー所有の正本モデル。
+    const auto existing=document->shape(id); // モーダル操作中に参照が無効化しない値コピー。
+    if ((!id.isNull() && (!existing || existing->kind() != ShapeKind::Text || !document->canEditShape(id)))
+        || (id.isNull() && !document->canCreateShape())) return;
+    const auto targetLayer=document->activeLayerId(); // 新規入力開始時のレイヤー。
+    const auto *oldText=existing ? std::get_if<TextGeometry>(&existing->geometryMm) : nullptr; // コピー内の属性参照。
+    TextEditDialog dialog(oldText ? oldText->text : QString(),oldText ? oldText->pointSizePt : m_textPointSize,fixedTextFontFamily(),this);
+    while (dialog.exec() == QDialog::Accepted) {
+        const auto geometry=makeTextGeometry(dialog.text(),dialog.pointSize(),oldText ? oldText->anchorMm : anchorMm); // 設定値から字形を生成する。
+        bool applied=false; // 不正候補は文書と履歴を変更しない。
+        if (geometry && existing) {
+            ShapeData next=*existing; // 配置・UUID・所属と表示倍率を維持する。
+            next.geometryMm=*geometry; applied=document->updateShape(next);
+        } else if (geometry && document->activeLayerId() == targetLayer) applied=!document->addShape(*geometry).isNull();
+        if (applied) {
+            if (!existing) m_textPointSize=dialog.pointSize();
+            const QSignalBlocker block(m_textSizeInput); // 次の入力サイズ表示の更新ではモデルを変更しない。
+            m_textSizeInput->setValue(m_textPointSize/m_textUnit->currentData().toDouble());
+            return;
+        }
+        QMessageBox::warning(this,tr("文字を適用できません"),tr("文字が座標範囲（±10000000mm）を超えるか、対象を編集できません。内容やサイズを確認してください。"));
+    }
 }
 
 /// @brief 現在の縮尺と、用紙が覆う実寸mmの範囲を表示する。
@@ -534,6 +604,8 @@ MainWindow::~MainWindow()
 {
     // 子ビューの派生クラス破棄後にモデル破棄通知から頂点マーカーを操作させない。
     disconnect(m_objectInfoPanel,nullptr,m_drawingView,nullptr);
+    disconnect(m_objectInfoPanel,nullptr,this,nullptr); // 文字編集要求も派生クラス破棄前に切り離す。
+    disconnect(m_drawingView,nullptr,this,nullptr); // 子ビューの終了通知から入力UIを参照させない。
     // インライン編集の終了が子の破棄中に発生しても、破棄済みのMainWindowへ通知しない。
     disconnect(m_drawingView->document(),nullptr,this,nullptr);
     delete ui;

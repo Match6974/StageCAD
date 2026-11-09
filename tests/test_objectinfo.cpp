@@ -3,6 +3,10 @@
  * @brief 選択図形の情報表示・更新・ロケール・参照先の寿命を検証する。
  */
 #include "objectinfopanel.h"
+#include "texteditdialog.h"
+#include <QPlainTextEdit>
+#include <QComboBox>
+#include <QDialogButtonBox>
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
 #include "rectangleanchorselector.h"
@@ -56,6 +60,36 @@ class ObjectInfoTests : public QObject {
 private slots:
     /// @brief 表示文字列の比較に使う小数点形式を統一する。
     void init() { QLocale::setDefault(QLocale::c()); }
+    /// @brief 日本語・改行・文字サイズの任意値・単位切替・取消を文書適用前に検証する。
+    void textDraftDialog() {
+        // dialog: 確定前の文字とサイズだけを保持する入力画面。
+        TextEditDialog dialog({},12,QStringLiteral("Sans Serif")); dialog.show();
+        // text: 日本語IMEと改行を受け付ける編集欄。
+        auto *text = dialog.findChild<QPlainTextEdit*>("textContentInput");
+        // size: 現在の単位で任意値を指定する欄。
+        auto *size = dialog.findChild<QLineEdit*>("textSizeInput");
+        // unit: pt・mm・インチの選択。
+        auto *unit = dialog.findChild<QComboBox*>("textSizeUnit");
+        // buttons: 有効性によってOKが切り替わるボタン群。
+        auto *buttons = dialog.findChild<QDialogButtonBox*>("textDialogButtons");
+        QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        text->setPlainText(QString::fromUtf8("照明\n音響")); size->setText("24");
+        QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled()); QCOMPARE(dialog.pointSize(),24.0);
+        // count: 表示値を丸めても単位切替の反復でpt値を失わないことを確認する回数。
+        for (int count=0;count<10;++count) {
+            unit->setCurrentIndex(1); QCOMPARE(dialog.pointSize(),24.0);
+            unit->setCurrentIndex(2); QCOMPARE(dialog.pointSize(),24.0);
+            unit->setCurrentIndex(0); QCOMPARE(dialog.pointSize(),24.0);
+        }
+        unit->setCurrentIndex(1); size->setText("25.4"); QCOMPARE(dialog.pointSize(),72.0);
+        // invalid: 不正値・空白・ゼロ・非有限値を拒否するための入力。
+        for (const QString invalid : {QString(),QString("0"),QString("-1"),QString("NaN"),QString("inf")}) {
+            size->setText(invalid); QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        }
+        unit->setCurrentIndex(0); size->setText("12"); text->setFocus();
+        QTest::keyClick(text,Qt::Key_Return); QVERIFY(dialog.isVisible()); QVERIFY(dialog.text().contains('\n'));
+        QTest::keyClick(&dialog,Qt::Key_Escape); QCOMPARE(dialog.result(),int(QDialog::Rejected));
+    }
     /// @brief 9点マトリクスの見た目とCAD上の固定点の対応をテスト行として用意する。
     void rectangleAnchors_data() {
         QTest::addColumn<int>("anchorIndex"); QTest::addColumn<QPointF>("fraction");

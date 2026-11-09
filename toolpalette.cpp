@@ -58,7 +58,7 @@ const std::array<ToolEntry, 10> tools = {{
     {DrawingTool::Dimension, "141901", QT_TRANSLATE_NOOP("ToolPalette", "縦横寸法ツール"),
         QT_TRANSLATE_NOOP("ToolPalette", "縦横寸法"), "", false},
     {DrawingTool::Text, "142001", QT_TRANSLATE_NOOP("ToolPalette", "文字ツール"),
-        QT_TRANSLATE_NOOP("ToolPalette", "文字"), "", false}
+        QT_TRANSLATE_NOOP("ToolPalette", "文字"), QT_TRANSLATE_NOOP("ToolPalette", "横書き"), true}
 }};
 
 /// @brief 指定ツールの静的定義を探す。未定義ならnullptrを返す。

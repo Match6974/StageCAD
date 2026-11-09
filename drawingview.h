@@ -102,6 +102,12 @@ public:
     void setContentBounds(QRectF bounds);
 
 signals:
+    /// @brief 文字の左上配置点を指定したことを通知する。入力・確定はメイン画面が行う。
+    /// @param anchorMm 左上の実寸座標（mm）。
+    void textCreationRequested(QPointF anchorMm);
+    /// @brief 選択モードでダブルクリックした文字の編集を要求する。
+    /// @param id 編集する文字UUID。
+    void textEditRequested(const QUuid &id);
     /// @brief カーソル位置を実寸mmで通知する。
     /// @param modelMm 用紙中心基準の実寸座標（mm）。
     void cursorPositionChanged(QPointF modelMm);

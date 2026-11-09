@@ -108,7 +108,7 @@ private slots:
         QTest::mouseClick(button(&palette, DrawingTool::Selection), Qt::LeftButton);
         QCOMPARE(changed.count(), 6);
         // future: 未対応で無効になっていることを確認する後続ツール。
-        for (DrawingTool future : {DrawingTool::Reshape, DrawingTool::Join, DrawingTool::Dimension, DrawingTool::Text}) {
+        for (DrawingTool future : {DrawingTool::Reshape, DrawingTool::Join, DrawingTool::Dimension}) {
             QVERIFY(!palette.toolAction(future)->isEnabled());
             QVERIFY(!palette.setCurrentTool(future));
             palette.toolAction(future)->trigger();
@@ -139,7 +139,7 @@ private slots:
         palette.resize(360, 180);
         QTRY_COMPARE(second->y(), first->y());
         QVERIFY(second->x() > first->x());
-        QVERIFY(!palette.toolAction(DrawingTool::Text)->isEnabled());
+        QVERIFY(palette.toolAction(DrawingTool::Text)->isEnabled());
         palette.resize(120, 160);
         QTRY_VERIFY(second->y() > first->y());
         palette.resize(180, 750);

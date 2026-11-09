@@ -9,6 +9,7 @@
 #include "shapedata.h"
 #include "drawinglayer.h"
 #include <QObject>
+#include <QHash>
 #include <QList>
 #include <optional>
 class QUndoStack;
@@ -32,7 +33,7 @@ public:
     /// @param id 図形インスタンスを識別するUUID。CSVの機能IDとは別に扱う。
     std::optional<ShapeData> shape(const QUuid &id) const;
     /// @brief 有効な形状へ新しいUUIDを付けて追加する。不正値や再入時は空のUUIDを返す。
-    /// @param geometryMm 配置前の形状データ（実寸mm）。
+    /// @param geometryMm 配置前の形状データ。図形座標は実寸mm、文字サイズはpt。
     QUuid addShape(ShapeGeometry geometryMm);
     /// @brief 対象IDと移動後の形状を全件検証する。モデルは変更しない。
     /// @param ids 操作対象の図形UUID一覧。重複は一括操作でまとめて扱う。
@@ -85,10 +86,20 @@ public:
     /// @param id 対象レイヤーUUID。
     /// @param visibility 通常・非表示・グレイのいずれか。
     bool setLayerVisibility(const QUuid &id,LayerVisibility visibility);
-    /// @brief 対象レイヤーの縮尺だけを変更する。実寸と履歴は変更しない。
+    /// @brief 対象レイヤーの縮尺と文字の見た目を変更する。図形寸法・設定pt・履歴は維持する。
     /// @param id 対象レイヤーUUID。
     /// @param denominator 縮尺1:Nの分母。表示設定と共通の有限な許容範囲に限る。
-    bool setLayerScale(const QUuid &id,double denominator);
+    /// @param scaleText trueなら紙面上の文字も縮尺比で伸縮する。設定ptは維持する。
+    bool setLayerScale(const QUuid &id,double denominator,bool scaleText = false);
+    /// @brief レイヤー縮尺と文字の表示補正を含むローカル描画パスを返す。
+    /// @param data 文書内の図形データ。
+    QPainterPath shapePath(const ShapeData &data) const;
+    /// @brief 文字の表示補正と配置を含む実寸mmの外接範囲を返す。
+    /// @param data 文書内の図形データ。
+    QRectF shapeBounds(const ShapeData &data) const;
+    /// @brief レイヤーの表示換算を含めて実寸座標範囲を検証する。
+    /// @param data 候補の図形データ。
+    bool validShape(const ShapeData &data) const;
     /// @brief 手動表示状態と、アクティブレイヤーとの縮尺一致から実際の表示状態を返す。
     /// @param id 既存レイヤーUUID。存在しない場合は非表示を返す。
     LayerVisibility effectiveLayerVisibility(const QUuid &id) const;
@@ -144,6 +155,8 @@ private:
     QUndoStack *m_history;
 
     // m_shapes: モデルが値として所有する確定図形。描画・重なり順を保持する。
+    // m_textVisualScales: 設定ptと独立した表示倍率。Undoで属性を戻しても縮尺設定は維持する。
+    QHash<QUuid,double> m_textVisualScales;
     QList<ShapeData> m_shapes; // In drawing/stacking order.
     // m_mutating: モデルの変更通知中に入れ子の変更を受け付けないための再入防止フラグ。
     bool m_mutating = false;

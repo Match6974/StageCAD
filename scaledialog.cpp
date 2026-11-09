@@ -7,6 +7,7 @@
 #include "drawingsettings.h"
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDoubleValidator>
 #include <QFormLayout>
@@ -62,6 +63,10 @@ ScaleDialog::ScaleDialog(const DrawingSettings *settings, QWidget *parent)
     m_custom->setText(initialValue);
     form->addRow(tr("縮尺 1 :"), m_custom);
     layout->addLayout(form);
+    m_scaleText = new QCheckBox(tr("スケールテキスト"),this);
+    m_scaleText->setObjectName("scaleTextCheckBox");
+    m_scaleText->setToolTip(tr("ON: 文字の見た目も縮尺に比例して伸縮します。OFF: 用紙上の大きさを保ちます。フォントサイズの設定値は変更しません。"));
+    layout->addWidget(m_scaleText);
 
     // preset: 現在の縮尺に対応する候補のインデックス。任意入力は末尾。
     int preset = m_presets->findData(settings->scaleDenominator());
@@ -111,6 +116,9 @@ double ScaleDialog::scaleDenominator() const
     const double value = validator->locale().toDouble(m_custom->text(), &ok);
     return ok ? value : 0.0;
 }
+
+/// @brief 確定時に適用する、文字の見た目の伸縮指定を返す。
+bool ScaleDialog::scaleText() const { return m_scaleText->isChecked(); }
 
 /// @brief 入力の有効性を確認し、確定ボタンとエラー表示を更新する。
 void ScaleDialog::validateInput()

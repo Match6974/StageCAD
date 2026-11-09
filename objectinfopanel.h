@@ -13,6 +13,7 @@
 class DrawingDocument;
 class ShapeSelectionModel;
 class QLabel;
+class QPushButton;
 class QGroupBox;
 class QFormLayout;
 class QLineEdit;
@@ -31,6 +32,9 @@ public:
     /// @brief 子ウィジェットの破棄より先に、モデルからの通知を切り離す。
     ~ObjectInfoPanel() override;
 signals:
+    /// @brief 単独選択文字の内容とサイズを編集するダイアログを要求する。
+    /// @param id 編集対象の文字UUID。
+    void textEditRequested(const QUuid &id);
     /// @brief 選択頂点を図面上に表示する。非多角形や未選択ではvisible=false。
     /// @param point 用紙中心基準の実寸座標（mm）。
     /// @param visible 頂点マーカーを表示するかどうか。
@@ -88,6 +92,8 @@ private:
     QLabel *m_summary;
     // m_shapeGroup: 形状の情報行をまとめるグループ。スクロール内容が所有する。
     QGroupBox *m_shapeGroup;
+    // m_textEditButton: 選択文字の内容・サイズを編集する、形状グループ所有のボタン。
+    QPushButton *m_textEditButton;
     // m_form: 項目名と値を並べる、形状グループ所有のレイアウト。
     QFormLayout *m_form;
     // m_values: 項目名から値ラベルへの参照表。各ラベルは形状グループが所有する。

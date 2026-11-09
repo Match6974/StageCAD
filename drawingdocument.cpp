@@ -43,6 +43,12 @@ bool sameShape(const ShapeData &a,const ShapeData &b)
         return samePoint(circle->centerMm+a.positionMm,other.centerMm+b.positionMm)
             && circle->radiusMm == other.radiusMm && circle->startAngleDeg == other.startAngleDeg && circle->sweepAngleDeg == other.sweepAngleDeg;
     }
+    if (const auto *text = std::get_if<TextGeometry>(&a.geometryMm)) {
+        const auto &other = std::get<TextGeometry>(b.geometryMm); // 比較相手の設定値と字形。
+        return text->text == other.text && text->fontFamily == other.fontFamily
+            && text->pointSizePt == other.pointSizePt && text->unitPath == other.unitPath && text->unitBounds == other.unitBounds
+            && samePoint(text->anchorMm+a.positionMm,other.anchorMm+b.positionMm);
+    }
     // points: 第1のローカル頂点列。other: 同じ順序で比較する第2の頂点列。
     const auto &points = std::get<QPolygonF>(a.geometryMm), &other = std::get<QPolygonF>(b.geometryMm);
     if (points.size() != other.size()) return false;
@@ -297,16 +303,43 @@ bool DrawingDocument::setLayerVisibility(const QUuid &id,LayerVisibility visibil
 /// @brief 他のレイヤーや図形寸法を変えずに縮尺を確定する。表示操作なのでRedoを保持する。
 /// @param id 変更対象レイヤーのUUID。
 /// @param denominator 新しい縮尺1:Nの分母。
-bool DrawingDocument::setLayerScale(const QUuid &id,double denominator) {
+/// @param scaleText 文字の見た目を縮尺比で伸縮するか。設定ptは維持する。
+bool DrawingDocument::setLayerScale(const QUuid &id,double denominator,bool scaleText) {
     // target: 存在・変更前の縮尺を確認する値コピー。
     const auto target = layer(id);
     if (m_mutating || !target || !DrawingSettings::isValidScale(denominator)) return false;
     if (target->scaleDenominator == denominator) return true;
+    auto nextVisual = m_textVisualScales; // 全件検証後に一括反映する、表示倍率の候補。
+    for (const auto &shape : m_shapes) { // 対象レイヤーの文字だけに適用する。
+        if (shape.layerId != id || shape.kind() != ShapeKind::Text) continue;
+        const double visual = nextVisual.value(shape.id,1) * (scaleText ? target->scaleDenominator/denominator : 1); // 設定ptと独立した倍率。
+        if (!shape.isValid(denominator*visual)) return false;
+        nextVisual.insert(shape.id,visual);
+    }
     // guard: 変更中の描画・履歴操作の割り込みを防ぐガード。
     QScopedValueRollback<bool> guard(m_mutating,true); emit aboutToChange();
+    m_textVisualScales = nextVisual;
     // data: 対象の換算倍率だけを更新するレイヤー。
     for (auto &data : m_layers) if (data.id == target->id) data.scaleDenominator = denominator;
     emit layersChanged(); return true;
+}
+/// @brief レイヤー換算と文字の見た目だけの倍率から描画パスを得る。
+/// @param data 文書内の図形。
+QPainterPath DrawingDocument::shapePath(const ShapeData &data) const {
+    const auto owner=layer(data.layerId); // 紙面mmから実寸への換算元。
+    return data.localPath((owner ? owner->scaleDenominator : 1)*m_textVisualScales.value(data.id,1));
+}
+/// @brief 文字の空白を含む行ボックスも実寸で返す。
+/// @param data 文書内の図形。
+QRectF DrawingDocument::shapeBounds(const ShapeData &data) const {
+    const auto owner=layer(data.layerId); // 紙面mmから実寸への換算元。
+    return data.boundsMm((owner ? owner->scaleDenominator : 1)*m_textVisualScales.value(data.id,1));
+}
+/// @brief 表示倍率込みの範囲を検証する。モデル検証でフォントAPIは使用しない。
+/// @param data 確定候補。
+bool DrawingDocument::validShape(const ShapeData &data) const {
+    const auto owner=layer(data.layerId); // 対象の所属先。
+    return owner && data.isValid(owner->scaleDenominator*m_textVisualScales.value(data.id,1));
 }
 /// @brief 縮尺が一致する場合だけ手動の表示状態を使い、不一致の場合は一時的に隠す。
 /// @param id 表示状態を調べるレイヤーUUID。
@@ -372,7 +405,7 @@ QUuid DrawingDocument::addShape(ShapeGeometry geometryMm)
     if (m_mutating || !canCreateShape()) return {};
     // data: 検証・追加・表示同期に使う図形データ。
     ShapeData data{QUuid::createUuid(), std::move(geometryMm), {}}; data.layerId = m_activeLayerId;
-    if (!data.isValid()) return {};
+    if (!validShape(data)) return {};
     // next: 追加後の描画順を保持する一時候補。
     auto next = m_shapes; next.append(data);
     if (!commit(next,tr("図形を作成"))) return {};
@@ -391,7 +424,7 @@ bool DrawingDocument::canTranslateShapes(const QList<QUuid> &ids, QPointF delta)
         auto data = shape(id);
         if (!data || !canEditShape(id)) return false;
         data->positionMm += delta;
-        if (!data->isValid()) return false;
+        if (!validShape(*data)) return false;
     }
     return true;
 }
@@ -438,7 +471,7 @@ bool DrawingDocument::setLineEndpoints(const QUuid &id, const QLineF &lineMm)
     if (!original || !canEditShape(id) || original->kind() != ShapeKind::Line) return false;
     // next: 実寸座標に統合した候補形状。配置を0にし、ローカル座標の範囲制限にも合わせる。
     ShapeData next = *original; next.geometryMm = lineMm; next.positionMm = {};
-    if (!next.isValid()) return false;
+    if (!validShape(next)) return false;
     // current: 比較用の変更前の両端座標（実寸mm）。
     const QLineF current = std::get<QLineF>(original->geometryMm).translated(original->positionMm);
     // 微小な有効変更を失わないよう、座標ごとに厳密比較して無変更だけを除く。
@@ -462,7 +495,7 @@ bool DrawingDocument::setRectangleBounds(const QUuid &id, const QRectF &boundsMm
     if (!original || !canEditShape(id) || original->kind() != ShapeKind::Rectangle) return false;
     // next: 配置を実寸形状へ統合して検証する候補。通知中もUUIDを固定して保持する。
     ShapeData next = *original; next.geometryMm = boundsMm; next.positionMm = {};
-    if (!next.isValid()) return false;
+    if (!validShape(next)) return false;
     // current: 配置移動量を反映した変更前の矩形（実寸mm）。
     const QRectF current = std::get<QRectF>(original->geometryMm).translated(original->positionMm);
     if (current.x() == boundsMm.x() && current.y() == boundsMm.y()
@@ -489,7 +522,7 @@ bool DrawingDocument::setCircleRadius(const QUuid &id, double radiusMm)
     ShapeData next = *original;
     next.positionMm = {}; next.geometryMm = CircleGeometry{circle.centerMm + original->positionMm, radiusMm,
                                                           circle.startAngleDeg,circle.sweepAngleDeg};
-    if (!next.isValid()) return false;
+    if (!validShape(next)) return false;
     if (circle.radiusMm == radiusMm) return true;
     // shapes: 同じUUIDと描画位置を維持した変更候補。
     auto shapes = m_shapes;
@@ -506,7 +539,7 @@ bool DrawingDocument::updateShape(const ShapeData &candidate)
     const ShapeData next = candidate;
     // original: 同じ図形種類とUUIDを確認する変更前の値。
     const auto original = shape(next.id);
-    if (m_mutating || !original || !canEditShape(next.id) || next.layerId != original->layerId || original->kind() != next.kind() || !next.isValid() || !layer(next.layerId)) return false;
+    if (m_mutating || !original || !canEditShape(next.id) || next.layerId != original->layerId || original->kind() != next.kind() || !validShape(next) || !layer(next.layerId)) return false;
     // shapes: 同じUUIDと描画位置を維持した変更候補。
     auto shapes = m_shapes;
     // data: 対象の形状だけを置き換える図形。

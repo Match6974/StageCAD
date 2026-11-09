@@ -4,6 +4,15 @@
  */
 
 #include "drawingview.h"
+#include "textlayout.h"
+#include "texteditdialog.h"
+#include "scaledialog.h"
+#include <QDialogButtonBox>
+#include <QPlainTextEdit>
+#include <QComboBox>
+#include <QGraphicsPathItem>
+#include <QImage>
+#include <QPainter>
 #include "drawingdocument.h"
 #include "shapeselectionmodel.h"
 #include "drawingsettings.h"
@@ -42,6 +51,138 @@
 class DrawingTests : public QObject {
     Q_OBJECT
 private slots:
+    /// @brief 設定ptを変えず、ON／OFFの表示倍率・編集履歴・レイヤー独立性を検証する。
+    void textScaleKeepsFontAttributes() {
+        DrawingSettings settings; // 用紙の換算設定。
+        DrawingView view(&settings); view.resize(900,650); view.show(); // 文書と表示の両方を検証する。
+        auto *document=view.document(); // ビュー所有のモデル。
+        const auto first=document->activeLayerId(); // 文字を置く対象レイヤー。
+        QVERIFY(document->setLayerScale(first,50));
+        const auto geometry=makeTextGeometry(QString::fromUtf8("照明 L\n音響"),12,{-200,200}); // 横書き2行。
+        QVERIFY(geometry);
+        const auto id=document->addShape(*geometry); QVERIFY(!id.isNull()); // 縮尺操作後も維持するUUID。
+        auto *item=qgraphicsitem_cast<QGraphicsPathItem*>(view.shapeItems().first()); QVERIFY(item); // 輪郭だけ描画するアイテム。
+        QCOMPARE(item->pen().style(),Qt::NoPen);
+        QCOMPARE(item->brush().style(),Qt::SolidPattern);
+        const QRectF initial=document->shapeBounds(*document->shape(id)); // 1:50の実寸換算ボックス。
+        QImage transparent(320,160,QImage::Format_ARGB32_Premultiplied); transparent.fill(Qt::transparent); // 背景を塗らないことをピクセルで検証する。
+        QPainter painter(&transparent); painter.setPen(Qt::NoPen); painter.setBrush(Qt::black); // 文字の輪郭だけを描く。
+        const auto normalized=QTransform::fromScale(45,45).map(geometry->unitPath); // 1emの字形を画面用へ換算する。
+        painter.translate(5,5-normalized.boundingRect().top()); painter.drawPath(normalized); painter.end();
+        QCOMPARE(transparent.pixelColor(319,159).alpha(),0);
+        int ink=0; // 背景透明のまま実際の文字画素が描かれた数。
+        for (int y=0; y<transparent.height(); ++y) // 行番号（px）。
+            for (int x=0; x<transparent.width(); ++x) ink += transparent.pixelColor(x,y).alpha()>0; // 列番号（px）。
+        QVERIFY(ink>0);
+        const QPainterPath originalPath=item->path(); // ONの変更で実寸表示形状が変わらないことを確認する。
+        QVERIFY(initial.height()>0); QVERIFY(initial.bottom()<=geometry->anchorMm.y()+0.001);
+        QVERIFY(document->setLayerScale(first,100,false));
+        QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,12.0);
+        const QRectF off=document->shapeBounds(*document->shape(id)); // OFFで用紙寸法を維持し、実寸換算値が2倍。
+        QVERIFY(qAbs(off.height()/100-initial.height()/50)<1e-9);
+        QVERIFY(qAbs(off.width()/100-initial.width()/50)<1e-9);
+        QVERIFY(document->setLayerScale(first,50,false)); QCOMPARE(item->path(),originalPath);
+        QVERIFY(document->setLayerScale(first,100,true));
+        QCOMPARE(item->path(),originalPath); // ONでは紙面寸法が半分となり実寸換算字形は維持される。
+        QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,12.0);
+        const QRectF on=document->shapeBounds(*document->shape(id)); // 見た目の行ボックス。
+        QCOMPARE(on,initial);
+        QVERIFY(document->setLayerScale(first,50,false));
+        const double beforeEdit=document->shapeBounds(*document->shape(id)).height(); // ONの補正をOFFへ戻しても維持する。
+        ShapeData edited=*document->shape(id); // UUIDと表示倍率は維持して内容・設定ptだけを変更する。
+        const auto replacement=makeTextGeometry(QString::fromUtf8("照明 L\n音響"),24,geometry->anchorMm); QVERIFY(replacement);
+        edited.geometryMm=*replacement; QVERIFY(document->updateShape(edited));
+        QVERIFY(qAbs(document->shapeBounds(*document->shape(id)).height()-beforeEdit*2)<1e-9);
+        QVERIFY(document->undo()); QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,12.0);
+        QVERIFY(qAbs(document->shapeBounds(*document->shape(id)).height()-beforeEdit)<1e-9);
+        QVERIFY(document->canRedo());
+        QVERIFY(document->setLayerScale(first,100,false)); QVERIFY(document->canRedo()); // 表示操作でRedo分岐を失わない。
+        QVERIFY(document->redo()); QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,24.0);
+        const auto other=document->addLayer(); // 異なるレイヤーの縮尺を変更しても元の補正を変えない。
+        const QRectF saved=document->shapeBounds(*document->shape(id));
+        QVERIFY(document->setLayerScale(other,200,true)); QCOMPARE(document->shapeBounds(*document->shape(id)),saved);
+        QVERIFY(document->setActiveLayer(first));
+        QVERIFY(document->translateShapes({id},{10,-20}));
+        const QRectF moved=document->shapeBounds(*document->shape(id)); // 配置移動後のボックス。
+        QCOMPARE(moved,saved.translated(10,-20));
+        QVERIFY(document->removeShapes({id})); QVERIFY(document->undo());
+        QCOMPARE(document->shapeBounds(*document->shape(id)),moved); // 再追加でも補正倍率を保持する。
+        QVERIFY(document->undo()); QCOMPARE(document->shapeBounds(*document->shape(id)),saved);
+        QVERIFY(!makeTextGeometry(" \n",12,{})); QVERIFY(!makeTextGeometry("A",0,{}));
+        ShapeData invalid=*document->shape(id); // 字形の範囲外・非有限設定を拒否する候補。
+        std::get<TextGeometry>(invalid.geometryMm).pointSizePt=std::numeric_limits<double>::infinity();
+        QVERIFY(!document->updateShape(invalid)); QCOMPARE(document->shapeBounds(*document->shape(id)),saved);
+        const auto large=makeTextGeometry("MMMM",1000,{9000000,0}); QVERIFY(large); // OFFで縮尺を上げると座標限界を越える文字。
+        const auto largeId=document->addShape(*large); QVERIFY(!largeId.isNull());
+        const auto beforeScale=document->layer(first)->scaleDenominator; // 拒否時は縮尺も字形も変わらない。
+        QVERIFY(!document->setLayerScale(first,10000,false)); QCOMPARE(document->layer(first)->scaleDenominator,beforeScale);
+        QVERIFY(document->setLayerScale(first,10000,true));
+        QCOMPARE(std::get<TextGeometry>(document->shape(largeId)->geometryMm).pointSizePt,1000.0);
+    }
+    /// @brief 実際の文字入力、取消、パレット編集、座標編集、縮尺ダイアログを通して描画継続を検証する。
+    void textCreationEditingAndScaleDialog() {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+        QTimer startup; // 起動時のPDF選択を取消すタイマー。
+        connect(&startup,&QTimer::timeout,[] {
+            for (auto *widget : QApplication::topLevelWidgets()) // Qt所有のトップレベル画面。
+                if (auto *dialog=qobject_cast<QFileDialog*>(widget); dialog && dialog->isVisible()) dialog->reject();
+        }); startup.start(20);
+        MainWindow window; startup.stop(); window.resize(1250,850); window.show(); QTest::qWait(10); // UIを統合して検証する画面。
+        auto *view=window.findChild<DrawingView*>(); auto *document=view->document(); // メイン画面内のビューと正本。
+        auto *palette=window.findChild<ToolPalette*>(); auto *info=window.findChild<ObjectInfoPanel*>(); // 文字ツールと編集入口。
+        QVERIFY(palette->setCurrentTool(DrawingTool::Text)); QCOMPARE(view->activeTool(),DrawingTool::Text);
+        auto *toolbarSize=window.findChild<QDoubleSpinBox*>("textToolbarSizeInput"); QVERIFY(toolbarSize); // 次の作成サイズ。
+        toolbarSize->setValue(18);
+        QTimer::singleShot(0,&window,[&window] { // 新規ダイアログには表示バーの18ptが入る。
+            auto *dialog=window.findChild<TextEditDialog*>(); QVERIFY(dialog); QCOMPARE(dialog->pointSize(),18.0);
+            dialog->findChild<QPlainTextEdit*>("textContentInput")->setPlainText(QString::fromUtf8("照明 Light\n音響 Sound"));
+            dialog->findChild<QDialogButtonBox*>("textDialogButtons")->button(QDialogButtonBox::Ok)->click();
+        });
+        const QPoint pixel=view->mapFromScene({-80,60}); // 左上配置点の画面座標（px）。
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,pixel);
+        QCOMPARE(document->shapes().size(),1); QCOMPARE(view->draftPointCount(),0);
+        const auto id=document->shapes().first().id; // 作成・編集・移動を通じて維持するUUID。
+        const auto text=std::get<TextGeometry>(document->shape(id)->geometryMm); // 入力した文字属性。
+        QCOMPARE(text.pointSizePt,18.0); QCOMPARE(text.anchorMm,view->mapToScene(pixel)); QVERIFY(text.text.contains(QString::fromUtf8("照明")));
+        const QRectF initial=document->shapeBounds(*document->shape(id)); // 正立した文字はアンカーより下に表示される。
+        QVERIFY(initial.bottom()<=text.anchorMm.y()+0.01);
+        QTimer::singleShot(0,&window,[&window] { window.findChild<TextEditDialog*>()->reject(); }); // 取消では新規履歴を追加しない。
+        QVERIFY(view->submitDrawingPoint({0,0})); QCOMPARE(document->shapes().size(),1);
+        QVERIFY(palette->setCurrentTool(DrawingTool::Selection));
+        QTest::mouseClick(view->viewport(),Qt::LeftButton,Qt::NoModifier,view->mapFromScene(initial.center()));
+        QCOMPARE(view->selectionModel()->selectedIds(),QList<QUuid>({id}));
+        auto *edit=info->findChild<QPushButton*>("editSelectedTextButton"); QVERIFY(edit && edit->isVisible()); // 文字の編集入口。
+        QTimer::singleShot(0,&window,[&window] {
+            auto *dialog=window.findChild<TextEditDialog*>(); QVERIFY(dialog); // 下書きは確定までモデルへ書かれない。
+            dialog->findChild<QLineEdit*>("textSizeInput")->setText("24");
+            dialog->findChild<QPlainTextEdit*>("textContentInput")->setPlainText(QString::fromUtf8("照明 Light\n音響 Sound\n舞台 Stage"));
+            dialog->findChild<QDialogButtonBox*>("textDialogButtons")->button(QDialogButtonBox::Ok)->click();
+        }); edit->click();
+        QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,24.0);
+        QVERIFY(document->undo()); QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,18.0);
+        QVERIFY(document->redo());
+        auto *x=info->findChild<QLineEdit*>("edit_originX"); QVERIFY(x); // 文字左上のX（実寸mm）。
+        x->setFocus(); x->selectAll(); QTest::keyClicks(x,"-70"); QTest::keyClick(x,Qt::Key_Return);
+        QCOMPARE(document->shape(id)->referencePoint({}).x(),-70.0);
+        auto *settings=window.findChild<DrawingSettings*>(); QVERIFY(settings); // 縮尺UIの下書き元。
+        ScaleDialog draft(settings); auto *check=draft.findChild<QCheckBox*>("scaleTextCheckBox"); QVERIFY(check);
+        QVERIFY(!draft.scaleText()); check->setChecked(true); QVERIFY(draft.scaleText()); draft.reject();
+        const double before=document->shapeBounds(*document->shape(id)).height(); // 縮尺UI適用前の文字の実寸表示高。
+        QTimer::singleShot(0,&window,[&window] {
+            auto *dialog=window.findChild<ScaleDialog*>(); QVERIFY(dialog);
+            dialog->findChild<QComboBox*>("scalePresets")->setCurrentIndex(1); // 1:10。
+            dialog->findChild<QCheckBox*>("scaleTextCheckBox")->setChecked(true);
+            dialog->findChild<QDialogButtonBox*>("scaleDialogButtons")->button(QDialogButtonBox::Ok)->click();
+        }); window.findChild<QAction*>("editScaleAction")->trigger();
+        QCOMPARE(document->layer(document->activeLayerId())->scaleDenominator,10.0);
+        QVERIFY(qAbs(document->shapeBounds(*document->shape(id)).height()-before)<1e-9);
+        QCOMPARE(std::get<TextGeometry>(document->shape(id)->geometryMm).pointSizePt,24.0);
+        QVERIFY(document->setLayerScale(document->activeLayerId(),1,true));
+        if (qEnvironmentVariableIsSet("STAGECAD_CAPTURE")) { view->selectionModel()->clear(); QVERIFY(window.grab().save("step4-text.png")); }
+        QVERIFY(palette->setCurrentTool(DrawingTool::Line));
+        QVERIFY(view->submitDrawingPoint({-20,-30})); QVERIFY(view->submitDrawingPoint({30,-30}));
+        QCOMPARE(document->shapes().size(),2); // 文字編集後も他の図形を継続して描ける。
+    }
     /// @brief パネルでの直線編集が、同じUUIDの表示・選択判定へ反映されることを検証する。
     void linePropertiesUpdateCanvas() {
         QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);

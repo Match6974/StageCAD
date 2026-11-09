@@ -242,7 +242,7 @@ bool DrawingView::setActiveTool(DrawingTool tool)
 {
     if (m_picking || (tool != DrawingTool::Selection && tool != DrawingTool::Pan
         && tool != DrawingTool::Line && tool != DrawingTool::Rectangle
-        && tool != DrawingTool::Circle && tool != DrawingTool::Polygon)) return false;
+        && tool != DrawingTool::Circle && tool != DrawingTool::Polygon && tool != DrawingTool::Text)) return false;
     if (m_activeTool != tool) {
         endShapeMove(false); m_selectionMenu->hide();
         cancelDrawing();
@@ -255,11 +255,11 @@ bool DrawingView::setActiveTool(DrawingTool tool)
     return true;
 }
 
-/// @brief 現在のツールが直線・四角・円・多角形の描画ツールかを返す。
+/// @brief 現在のツールが図形または文字の作成ツールかを返す。
 bool DrawingView::isDrawingTool() const
 {
     return m_activeTool == DrawingTool::Line || m_activeTool == DrawingTool::Rectangle
-        || m_activeTool == DrawingTool::Circle || m_activeTool == DrawingTool::Polygon;
+        || m_activeTool == DrawingTool::Circle || m_activeTool == DrawingTool::Polygon || m_activeTool == DrawingTool::Text;
 }
 
 /// @brief 現在のツールと作成途中の状態に対応する操作案内を返す。
@@ -270,6 +270,7 @@ QString DrawingView::drawingHint() const
     if (m_activeTool == DrawingTool::Selection)
         return tr("クリックで選択、Shiftで追加・解除。選択図形をドラッグで移動、Delか右クリックで削除、Escで解除します。");
     if (m_activeTool == DrawingTool::Pan) return tr("左ドラッグで画面を移動します。");
+    if (m_activeTool == DrawingTool::Text) return tr("文字の左上位置を指定してください。横書きで入力します。");
     if (m_activeTool == DrawingTool::Polygon)
         return m_draftPoints.isEmpty() ? tr("最初の頂点を指定してください。")
             : tr("頂点を追加します。始点か終点のダブルクリックで完了。Delで1点戻り、Escで中止します。");
@@ -313,7 +314,7 @@ bool DrawingView::nearDraftVertex(QPointF point, QPointF vertex) const
     return QLineF(viewportTransform().map(point), viewportTransform().map(vertex)).length() <= 6;
 }
 
-/// @brief 実寸mmの指定点を作成途中へ追加し、必要な点数で図形を確定する。不正点は拒否する。
+/// @brief 実寸mmの点で図形作成を進め、文字では1点で入力を要求する。不正点は拒否する。
 /// @param point 用紙中心基準の実寸座標（mm）。
 /// @param constrainLine 直線の終点にShift相当の角度制限を適用するかどうか。
 bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
@@ -323,6 +324,7 @@ bool DrawingView::submitDrawingPoint(QPointF point, bool constrainLine)
         emit drawingHintChanged(tr("座標は±10000000mm以内の有限の数値で指定してください。"));
         return false;
     }
+    if (m_activeTool == DrawingTool::Text) { emit textCreationRequested(point); return true; }
     if (m_activeTool == DrawingTool::Line && constrainLine && !m_draftPoints.isEmpty())
         point = constrainedLinePoint(m_draftPoints.first(), point);
     if (!validPoint(point)) return false;
@@ -427,6 +429,11 @@ void DrawingView::syncShape(const QUuid &id)
         static_cast<OpenShapeItem<QGraphicsEllipseItem>*>(item)->setOpenPath(data->localPath(),!data->isFilled());
         break;
     }
+    case ShapeKind::Text:
+        tool = DrawingTool::Text;
+        if (!item) item = scene()->addPath({});
+        qgraphicsitem_cast<QGraphicsPathItem*>(item)->setPath(m_document->shapePath(*data));
+        break;
     case ShapeKind::Polygon:
         tool = DrawingTool::Polygon;
         if (!item) {
@@ -447,7 +454,11 @@ void DrawingView::syncShape(const QUuid &id)
     // brush: 通常の面表示または参照用の薄いグレイ塗り。
     QBrush brush = shapeBrush();
     if (visibility == LayerVisibility::Gray) { pen.setColor(QColor("#999999")); brush = QColor(160,160,160,35); }
-    if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) line->setPen(pen);
+    if (data->kind() == ShapeKind::Text) {
+        auto *text = qgraphicsitem_cast<QGraphicsPathItem*>(item); // 字形のみ塗る。行ボックスの背景は描かない。
+        text->setPen(Qt::NoPen); text->setBrush(pen.color());
+    }
+    else if (auto *line = qgraphicsitem_cast<QGraphicsLineItem*>(item)) line->setPen(pen);
     else if (auto *rect = qgraphicsitem_cast<QGraphicsRectItem*>(item)) { rect->setPen(pen); rect->setBrush(brush); }
     else if (auto *ellipse = qgraphicsitem_cast<QGraphicsEllipseItem*>(item)) { ellipse->setPen(pen); ellipse->setBrush(brush); }
     else if (auto *polygon = qgraphicsitem_cast<QGraphicsPolygonItem*>(item)) { polygon->setPen(pen); polygon->setBrush(brush); }
@@ -526,7 +537,13 @@ QGraphicsItem *DrawingView::shapeAt(QPoint pixel) const
         const auto data = m_document->shape(shapeId(item));
         if (!data || !m_document->canEditShape(data->id)) continue;
         // path: 実寸形状を画面座標へ変換した選択判定用パス（px）。
-        const QPainterPath path = viewportTransform().map(data->localPath().translated(item->pos()));
+        if (data->kind() == ShapeKind::Text) {
+            // bounds: 空白・改行の隙間も含め、文字全体を選択できる表示上の行ボックス。
+            const QRectF bounds=m_document->shapeBounds(*data).translated(item->pos()-data->positionMm);
+            if (viewportTransform().mapRect(bounds).adjusted(-3,-3,3,3).contains(pixel)) return item;
+            continue;
+        }
+        const QPainterPath path = viewportTransform().map(m_document->shapePath(*data).translated(item->pos()));
         // filled: 選択判定で線の近傍だけでなく面の内部も対象にするかどうか。
         const bool filled = data->isFilled();
         if ((filled && path.contains(pixel)) || stroker.createStroke(path).contains(pixel)) return item;
@@ -631,7 +648,7 @@ void DrawingView::updateSceneBounds()
     QRectF bounds = m_contentBounds.isEmpty() ? paperBounds : paperBounds.united(m_contentBounds);
     // shape: 描画順に処理する確定済み図形データ。
     for (const auto &shape : m_document->shapes())
-        bounds = bounds.united(shape.boundsMm().adjusted(-1, -1, 1, 1));
+        bounds = bounds.united(m_document->shapeBounds(shape).adjusted(-1, -1, 1, 1));
     scene()->setSceneRect(bounds);
 }
 
@@ -886,7 +903,16 @@ void DrawingView::mouseReleaseEvent(QMouseEvent *event)
 /// @param event Qtから渡された入力または画面更新のイベント。
 void DrawingView::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if (!m_picking && m_activeTool == DrawingTool::Selection) { event->accept(); return; }
+    if (!m_picking && m_activeTool == DrawingTool::Selection) {
+        if (m_drawingEnabled && event->button() == Qt::LeftButton) {
+            auto *item = shapeAt(event->pos()); // 通常表示で編集可能な文字だけを対象とする。
+            const auto data = item ? m_document->shape(shapeId(item)) : std::nullopt; // 値として取得する。
+            if (data && data->kind() == ShapeKind::Text) {
+                endShapeMove(false); m_selectionModel->selectOnly(data->id); emit textEditRequested(data->id);
+            }
+        }
+        event->accept(); return;
+    }
     if (!m_picking && m_drawingEnabled && m_document->canCreateShape() && isDrawingTool() && event->button() == Qt::LeftButton) {
         m_drawPressed = false; m_ignoreDrawingRelease = true;
         if (m_activeTool == DrawingTool::Polygon && !m_draftPoints.isEmpty()) {
